@@ -1,0 +1,54 @@
+# Autofilled by tools/new_project_layout/probe_disc.py from your legal dump.
+# Review before shipping. Runtime quirks / overlay seeds still need hand work.
+
+[game]
+name = "ToyStoryRacer"
+id = "SLES-03398"
+players = 2
+exe = "disc/SLES_033.98"
+disc = "C:/archivio/toystoryrecomp/Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).cue"
+load_address = "0x80010000"
+entry_pc = "0x8008819C"
+text_size = "0x0009A000"
+stack_base = "0x801FFFF0"
+
+# Digests are for data Track 01 (first BINARY FILE / TRACK 01).
+[prepare_disc]
+out_dir = "disc"
+bin_name = "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).bin"
+cue_name = "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).cue"
+boot_exe = "SLES_033.98"
+known_sizes = [269120544]
+known_md5 = [
+  "145753eb5a111b35384888687422f54e",
+]
+known_sha1 = [
+  "62dc19d14792a09c8ab8ce1400ba8efe65e54d93",
+]
+known_crc32 = [
+  "8fe50139",
+]
+
+[recompiler]
+seeds = "seeds/ghidra_funcs.txt"
+out_dir = "generated"
+strict = true
+
+[runtime]
+window_title = "ToyStoryRacer Recompiled"
+memcard_dir = "saves"
+overlay_cache = true
+
+[video]
+renderer = "opengl"
+aspect_ratio = "4:3"
+
+[controller]
+default_mode = "digital"
+
+# Online mount gate: digests + track count + optional TOC fingerprint
+# (see docs/NETPLAY.md).
+[netplay]
+require_cue = true
+required_tracks = 1
+required_disc_fp = "a46d02073a7b0cd5c3d68046c62e80cd81ee772cf7c35a22ba2b388ae0c314df"

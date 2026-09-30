@@ -1,0 +1,48 @@
+{
+  "format_version": 1,
+  "game": {
+    "name": "ToyStoryRacer",
+    "id": "SLES-03398",
+    "boot_exe": "SLES_033.98"
+  },
+  "marketing": {
+    "description": "Disney-Pixar Toy Story Racer PAL recompilation project",
+    "publisher": "Disney Interactive",
+    "year": "2001",
+    "region": "PAL",
+    "players": 2
+  },
+  "rom_identity": {
+    "cue_name": "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).cue",
+    "bin_name": "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).bin",
+    "track_counts": [
+      1
+    ],
+    "require_cue": true,
+    "data_track": {
+      "size": 269120544,
+      "md5": "145753eb5a111b35384888687422f54e",
+      "sha1": "62dc19d14792a09c8ab8ce1400ba8efe65e54d93",
+      "crc32": "8fe50139"
+    },
+    "disc_fp": "a46d02073a7b0cd5c3d68046c62e80cd81ee772cf7c35a22ba2b388ae0c314df"
+  },
+  "exe": {
+    "load_address": "0x80010000",
+    "entry_pc": "0x8008819C",
+    "text_size": "0x0009A000",
+    "stack_base": "0x801FFFF0"
+  },
+  "seeds": {
+    "count": 629,
+    "source": "boot_exe_jal"
+  },
+  "warnings": [
+    "cue has only 1 TRACK \u2014 Track-01-only dumps fail multi-track netplay/catalog gates; prefer a full Redump cue."
+  ],
+  "notes": [
+    "entry_pc/load_address/text_size/stack_base taken from PS-X EXE header.",
+    "seeds are first-pass boot-EXE JAL targets (+ entry); expect to grow as overlays / runtime paths are discovered.",
+    "required_disc_fp is psxrecomp-toc-v1 (matches runtime DiscIdentity)."
+  ]
+}
