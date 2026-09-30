@@ -41,13 +41,14 @@ overlay_cache = true
 
 [video]
 renderer = "opengl"
-aspect_ratio = "4:3"
+aspect_ratio = "21:9"
 
 [controller]
 default_mode = "digital"
 
 # Online mount gate: digests + track count + optional TOC fingerprint
 # (see docs/NETPLAY.md).
+multitap_analog = true
 [netplay]
 require_cue = true
 required_tracks = 1
