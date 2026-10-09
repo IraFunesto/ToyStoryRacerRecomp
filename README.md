@@ -81,13 +81,17 @@ identical.
 The game reads any file placed under `disc_override/` next to the executable
 instead of the one on the disc (same path, e.g.
 `disc_override/COURSE_B/PIER.AXE`). If you also own the USA disc, copy the
-ten repaired files from it with:
+ten repaired files from it. After the first Generate & rebuild, run from the
+folder where you extracted the release zip:
 
 ```
-python tools/extract_us_maps.py "Disney-Pixar Toy Story Racer (USA).bin" <folder of ToyStoryRacer_Recompiled.exe>
+python tools/extract_us_maps.py "Disney-Pixar Toy Story Racer (USA).bin"
 ```
 
-The tool checks every file against the known USA release before writing it.
+The files go to `build/disc_override/`, next to the game executable the
+wizard built (pass another folder as a second argument if your game runs
+elsewhere). The tool checks every file against the known USA release before
+writing it.
 The game stays in your European language: only these ten track files change.
 
 ## How to play

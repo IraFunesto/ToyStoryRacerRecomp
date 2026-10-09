@@ -10,11 +10,12 @@ only repairs the tracks: Pier (sea grid corruption, GPU crash), Skate Park,
 Car Lot, Cinema, Neighbourhood (broken textures) and five tracks with minor
 damage.
 
-Usage:
+Usage (from the folder where you extracted the release zip):
     python tools/extract_us_maps.py "Disney-Pixar Toy Story Racer (USA).bin" [game folder]
 
-The game folder defaults to the current directory: run it from the folder of
-ToyStoryRacer_Recompiled.exe, or pass that folder. Accepts a raw .bin
+disc_override/ must sit next to the game executable the wizard built. The
+game folder defaults to build/ when it holds ToyStoryRacer_Recompiled.exe
+(the release zip layout), else the current directory. Accepts a raw .bin
 (2352-byte sectors) or a plain .iso (2048-byte sectors). Every file is checked
 against the known SHA-256 of the USA release before it is written.
 """
@@ -92,7 +93,12 @@ def main():
         print(__doc__)
         return 2
     disc = Disc(sys.argv[1])
-    game_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+    if len(sys.argv) > 2:
+        game_dir = sys.argv[2]
+    elif os.path.isfile(os.path.join("build", "ToyStoryRacer_Recompiled.exe")):
+        game_dir = "build"   # the release zip: the wizard builds the game there
+    else:
+        game_dir = "."
     out_dir = os.path.join(game_dir, "disc_override")
     ok = 0
     for rel, digest in FILES.items():
