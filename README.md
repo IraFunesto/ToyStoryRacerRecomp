@@ -73,26 +73,17 @@ filtering, save states, controller rumble.
 ## Damaged track data on the European disc
 
 The European disc has about 45 two-byte values overwritten (`3E 3E` where the
-USA disc has `80 3F` / `10 3F`) in ten track files. The visible results are
-broken textures and geometry on Skate Park, Pier, Car Lot, Cinema and
-Neighbourhood. Apart from those values the track files of both discs are
-identical.
+USA release has `80 3F` / `10 3F`) in ten track files. The visible results
+were broken textures and geometry on Skate Park, Pier, Car Lot, Cinema and
+Neighbourhood. The **Track data fix** feature (Fixes group, on by default)
+restores those values while the disc is read, so the tracks come out byte for
+byte like the USA release. It is a list of 46 guarded patches in the mod
+manifest: no game data is shipped, and nothing is changed if the expected
+European bytes are not found.
 
-The game reads any file placed under `disc_override/` next to the executable
-instead of the one on the disc (same path, e.g.
-`disc_override/COURSE_B/PIER.AXE`). If you also own the USA disc, copy the
-ten repaired files from it. After the first Generate & rebuild, run from the
-folder where you extracted the release zip:
-
-```
-python tools/extract_us_maps.py "Disney-Pixar Toy Story Racer (USA).bin"
-```
-
-The files go to `build/disc_override/`, next to the game executable the
-wizard built (pass another folder as a second argument if your game runs
-elsewhere). The tool checks every file against the known USA release before
-writing it.
-The game stays in your European language: only these ten track files change.
+The runtime can also read any file placed under `disc_override/` next to the
+game executable instead of the one on the disc (same path, e.g.
+`disc_override/COURSE_B/PIER.AXE`), for testing replacement data.
 
 ## How to play
 
@@ -103,7 +94,6 @@ The game stays in your European language: only these ten track files change.
 3. Select your own disc (.cue/.bin of SLES-03398) and follow the
    **Generate & rebuild** wizard: the game is compiled on your PC.
 4. Enable **Widescreen** in the launcher's Mods page.
-5. Optional: repair the damaged tracks as described above.
 
 The download contains no game data and no Sony BIOS; OpenBIOS (MIT-licensed)
 is used when you do not provide your own.

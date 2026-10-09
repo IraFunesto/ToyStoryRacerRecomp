@@ -17,6 +17,13 @@ description = "Disabled by default. Renders a wider field of view instead of str
 group = "Display"
 default_enabled = false
 
+[[feature]]
+id = "track-data-fix"
+name = "Track data fix"
+description = "Repairs track data that is damaged on the European disc: about 45 values in ten track files were overwritten when the disc was made, which breaks textures and geometry on Skate Park, Pier, Car Lot, Cinema and Neighbourhood. The values are restored to those of the USA release."
+group = "Fixes"
+default_enabled = true
+
 [[option]]
 feature = "widescreen"
 id = "aspect"
@@ -800,3 +807,328 @@ address = 0x80037F68
 expected = "cf 00 09 24"
 replace = "cf 00 09 34"        # ori t1,zero,207
 when = { minimap_position = "original" }
+
+# Track data fix: the European disc (SLES-03398) has 0x3E3E (and a few
+# neighbouring bytes) where the USA release has 0x3F80 / 0x3F10 in ten track
+# files. offset = disc LBA * 2048 + byte; expected = European bytes.
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 1412180                # COURSE_A/GAS.DAT +0x01454
+expected = "10"
+replace = "40"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 1420722                # COURSE_A/GAS.DAT +0x035B2
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 1421790                # COURSE_A/GAS.DAT +0x039DE
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 1421802                # COURSE_A/GAS.DAT +0x039EA
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 1428070                # COURSE_A/GAS.DAT +0x05266
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3237162                # COURSE_A/SIDSYARD.DAT +0x0352A
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3238233                # COURSE_A/SIDSYARD.DAT +0x03959
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3263314                # COURSE_A/SIDSYARD.DAT +0x09B52
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3678666                # COURSE_A/SNOWY.DAT +0x039CA
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3687146                # COURSE_A/SNOWY.DAT +0x05AEA
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3687958                # COURSE_A/SNOWY.DAT +0x05E16
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 3688090                # COURSE_A/SNOWY.DAT +0x05E9A
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189235862              # COURSE_B/BOWLING.DAT +0x03A96
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189563018              # COURSE_B/CARLOT.DAT +0x0388A
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189581250              # COURSE_B/CARLOT.DAT +0x07FC2
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189582706              # COURSE_B/CARLOT.DAT +0x08572
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189948358              # COURSE_B/CINEMA.DAT +0x041C6
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189948750              # COURSE_B/CINEMA.DAT +0x0434E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 189962386              # COURSE_B/CINEMA.DAT +0x07892
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191119416              # COURSE_B/PIER.AXE +0x00038
+expected = "3e3e"
+replace = "103f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191139264              # COURSE_B/PIER.AXE +0x04DC0
+expected = "3e3e"
+replace = "103f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191518776              # COURSE_B/SKATE.AXE +0x00038
+expected = "3e3e"
+replace = "103f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191538624              # COURSE_B/SKATE.AXE +0x04DC0
+expected = "3e3e"
+replace = "103f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191993438              # COURSE_B/STREET.DAT +0x0BE5E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 191993786              # COURSE_B/STREET.DAT +0x0BFBA
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192002682              # COURSE_B/STREET.DAT +0x0E27A
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192002706              # COURSE_B/STREET.DAT +0x0E292
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192011414              # COURSE_B/STREET.DAT +0x10496
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192011438              # COURSE_B/STREET.DAT +0x104AE
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192011582              # COURSE_B/STREET.DAT +0x1053E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012310              # COURSE_B/STREET.DAT +0x10816
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012334              # COURSE_B/STREET.DAT +0x1082E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012382              # COURSE_B/STREET.DAT +0x1085E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012418              # COURSE_B/STREET.DAT +0x10882
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012822              # COURSE_B/STREET.DAT +0x10A16
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012846              # COURSE_B/STREET.DAT +0x10A2E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012894              # COURSE_B/STREET.DAT +0x10A5E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192012930              # COURSE_B/STREET.DAT +0x10A82
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192013298              # COURSE_B/STREET.DAT +0x10BF2
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192013346              # COURSE_B/STREET.DAT +0x10C22
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192025430              # COURSE_B/STREET.DAT +0x13B56
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192025442              # COURSE_B/STREET.DAT +0x13B62
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192025454              # COURSE_B/STREET.DAT +0x13B6E
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192025514              # COURSE_B/STREET.DAT +0x13BAA
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192417103              # COURSE_C/BASKET.DAT +0x02D4F
+expected = "3e3e"
+replace = "803f"
+
+[[patch]]
+feature = "track-data-fix"
+target = "disc_user"
+offset = 192417351              # COURSE_C/BASKET.DAT +0x02E47
+expected = "3e3e"
+replace = "803f"

@@ -54,10 +54,6 @@ fi
 if [[ -d "${ROOT}/plugins" ]]; then
   EXTRA_PROJECT+=(--project-dir plugins)
 fi
-# The USA-disc track file extractor (disc_override/, see README).
-if [[ -f "${ROOT}/tools/extract_us_maps.py" ]]; then
-  EXTRA_PROJECT+=(--project-file tools/extract_us_maps.py)
-fi
 # Preloaded mod packages (mods/preloaded/packages/<id>). The activation plugin
 # above is compiled in, but selects itself through these marker files; without
 # them the mod is built and never enabled.
