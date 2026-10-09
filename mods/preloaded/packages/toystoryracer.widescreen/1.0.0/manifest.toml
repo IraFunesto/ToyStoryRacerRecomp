@@ -1,0 +1,802 @@
+format_version = 5
+id = "toystoryracer.widescreen"
+version = "1.0.0"
+name = "Toy Story Racer Widescreen"
+author = "ToyStoryRacerRecomp"
+description = "Native-wide widescreen presentation for Disney-Pixar Toy Story Racer."
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "SLES-03398"
+
+[[feature]]
+id = "widescreen"
+name = "Widescreen"
+description = "Disabled by default. Renders a wider field of view instead of stretching the 4:3 picture. Menus and videos stay 4:3."
+group = "Display"
+default_enabled = false
+
+[[option]]
+feature = "widescreen"
+id = "aspect"
+label = "Aspect ratio"
+description = "Fit follows the shape of the window, starting from 16:9. The other choices are fixed."
+group = "Display"
+type = "choice"
+default = "fit"
+
+[[option.choice]]
+value = "fit"
+label = "Fit to window"
+
+[[option.choice]]
+value = "16-9"
+label = "16:9"
+
+[[option.choice]]
+value = "21-9"
+label = "21:9"
+
+[[option.choice]]
+value = "32-9"
+label = "32:9"
+
+[[option]]
+feature = "widescreen"
+id = "high_refresh_vsync"
+label = "VSync on high-refresh monitors"
+description = "Keeps vertical sync on when the monitor runs above 60 Hz (120/144/165 Hz), so fast motion does not tear. Game speed is unchanged. OpenGL renderer."
+group = "Display"
+type = "choice"
+default = "on"
+
+[[option.choice]]
+value = "on"
+label = "On"
+
+[[option.choice]]
+value = "off"
+label = "Off"
+
+[[option]]
+feature = "widescreen"
+id = "hud_size"
+label = "HUD size"
+description = "Draws the race progress bar smaller so its low-resolution art looks sharper. 100% is the original size."
+group = "Display"
+type = "choice"
+default = "85"
+
+[[option.choice]]
+value = "100"
+label = "100%"
+
+[[option.choice]]
+value = "85"
+label = "85%"
+
+[[option.choice]]
+value = "75"
+label = "75%"
+
+[[option.choice]]
+value = "65"
+label = "65%"
+
+[[option]]
+feature = "widescreen"
+id = "cpu_overclock"
+label = "CPU overclock"
+description = "Gives the emulated CPU more time per frame, like DuckStation's CPU overclock. With the native scenery renderer the game needs little: 150% keeps two-player races at full rate, and high values only cost host CPU time (above about 300% the game can even run slow). The higher values are for the original renderer. Active only during races (menus run at the normal 100%). Game speed and music are unchanged."
+group = "Display"
+type = "choice"
+default = "150"
+
+[[option.choice]]
+value = "100"
+label = "Off (100%)"
+
+[[option.choice]]
+value = "150"
+label = "150%"
+
+[[option.choice]]
+value = "300"
+label = "300%"
+
+[[option.choice]]
+value = "500"
+label = "500%"
+
+[[option.choice]]
+value = "700"
+label = "700%"
+
+[[option]]
+feature = "widescreen"
+id = "track_detail"
+label = "Track draw distance"
+description = "The game hides track pieces that are far away or that its per-area visibility list (made for the 4:3 view) does not expect to be seen, so in a wide view scenery can pop in at the horizon and at the sides. Extended doubles the draw distance; Full also ignores the visibility list. Both draw more and are best used with the CPU overclock."
+group = "Display"
+type = "choice"
+default = "full"
+
+[[option.choice]]
+value = "original"
+label = "Original"
+
+[[option.choice]]
+value = "extended"
+label = "Extended"
+
+[[option.choice]]
+value = "full"
+label = "Full"
+
+[[option]]
+feature = "widescreen"
+id = "polygon_pool"
+label = "Near-polygon pool (experimental)"
+description = "Experimental. The game splits polygons close to the camera into pieces from a fixed pool of 2500; the wider view needs about twice as many, and when the pool runs out nearby ground turns black or its textures swim for a moment. Standard keeps the game's own memory (2300 pieces); Expanded raises the pool to 4600 using the 8 MB RAM mode. Save states made with one setting do not load with the other."
+group = "Display"
+type = "choice"
+default = "standard"
+
+[[option.choice]]
+value = "standard"
+label = "Standard (2300)"
+
+[[option.choice]]
+value = "expanded"
+label = "Expanded (4600, 8 MB RAM)"
+
+[[option]]
+feature = "widescreen"
+id = "frame_smoothing"
+label = "Frame smoothing"
+description = "The game draws 25 frames per second. Blend crossfades between them up to your monitor's refresh rate, so motion looks smoother; large changes cut cleanly to avoid trails. Presentation only: game speed and music are unchanged. OpenGL renderer."
+group = "Display"
+type = "choice"
+default = "off"
+
+[[option.choice]]
+value = "off"
+label = "Off"
+
+[[option.choice]]
+value = "blend"
+label = "Blend"
+
+[[option]]
+feature = "widescreen"
+id = "skip_videos"
+label = "Skip videos"
+description = "Skips the intro movies (and other videos) as soon as they start, so the game reaches the menus quickly."
+group = "Display"
+type = "choice"
+default = "on"
+
+[[option.choice]]
+value = "on"
+label = "On"
+
+[[option.choice]]
+value = "off"
+label = "Off"
+
+[[option]]
+feature = "widescreen"
+id = "native_scenery"
+label = "Native scenery renderer"
+description = "Draws the track scenery on the PC in full precision instead of the PlayStation pipeline: no vertex wobble or texture warping, no near-camera clipping or polygon pool limits, with a real depth buffer (objects behind walls stay hidden). Karts, pick-ups and the HUD still come from the game. OpenGL renderer."
+group = "Display"
+type = "choice"
+default = "on"
+
+[[option.choice]]
+value = "off"
+label = "Off"
+
+[[option.choice]]
+value = "on"
+label = "On"
+
+[[option]]
+feature = "widescreen"
+id = "frame_rate"
+label = "Frame rate in races"
+description = "The game draws 25 frames per second. '50 fps (1 player)' draws a new frame every VBlank in one-player races (the game is time-based, so its speed and the music are unchanged); when a frame needs more time it simply falls back to 25 for that moment. '50 fps (also 2 players)' does the same in two-player races too: it needs a fast PC, best with internal resolution 960 and CPU overclock 150; menus stay at 25. Best with the native scenery renderer."
+group = "Display"
+type = "choice"
+default = "50"
+
+[[option.choice]]
+value = "25"
+label = "25 fps (original)"
+
+[[option.choice]]
+value = "50"
+label = "50 fps (1 player)"
+
+[[option.choice]]
+value = "50_2p"
+label = "50 fps (also 2 players)"
+
+[[option]]
+feature = "widescreen"
+id = "music_change"
+label = "Music change hitch fix"
+description = "When the race music changes, the game waits for the CD drive to stop, which takes about two frames and shows as a small hitch (about two seconds into a race). Smooth answers that wait at once. Original keeps the hardware timing."
+group = "Display"
+type = "choice"
+default = "smooth"
+
+[[option.choice]]
+value = "smooth"
+label = "Smooth"
+
+[[option.choice]]
+value = "original"
+label = "Original"
+
+[[option]]
+feature = "widescreen"
+id = "minimap_position"
+label = "Race progress bar position"
+description = "Moves the race progress bar (the rope with the racers' faces) closer to the bottom edge, so it covers less of the track."
+group = "Display"
+type = "choice"
+default = "lower"
+
+[[option.choice]]
+value = "original"
+label = "Original"
+
+[[option.choice]]
+value = "lower"
+label = "Lower"
+
+[[plugin]]
+feature = "widescreen"
+id = "toystoryracer.widescreen"
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040900
+expected = "40 10 03 00"
+replace = "c0 10 03 00"        # sll v0,v1,3
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040904
+expected = "21 10 43 00"
+replace = "23 10 43 00"        # subu v0,v0,v1  (index = n*7)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040908
+expected = "80 10 02 00"
+replace = "00 00 00 00"        # nop
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004090C
+expected = "21 10 43 00"
+replace = "00 00 00 00"        # nop
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CA9C
+expected = "40 10 03 00"
+replace = "c0 10 03 00"        # sll v0,v1,3
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAA0
+expected = "21 10 43 00"
+replace = "23 10 43 00"        # subu v0,v0,v1  (index = n*7)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAA4
+expected = "80 10 02 00"
+replace = "00 00 00 00"        # nop
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAA8
+expected = "21 10 43 00"
+replace = "00 00 00 00"        # nop
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x800408D4
+expected = "0d 80 02 3c"
+replace = "30 80 02 3c"        # lui v0,0x8030 (index list)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x800408D8
+expected = "78 31 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040920
+expected = "0d 80 01 3c"
+replace = "30 80 01 3c"        # lui at,0x8030
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x800408E0
+expected = "8a 13 a2 24"
+replace = "f2 23 a2 24"        # addiu v0,a1,9202 (list end)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040914
+expected = "c4 09 62 28"
+replace = "f8 11 62 28"        # slti v0,v1,4600 (pieces)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80040924
+expected = "00 45 20 a4"
+replace = "f0 23 20 a4"        # sh zero,0x23F0(at) (terminator)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CA54
+expected = "0d 80 02 3c"
+replace = "30 80 02 3c"        # lui v0,0x8030 (index list)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CA58
+expected = "78 31 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAD0
+expected = "0d 80 01 3c"
+replace = "30 80 01 3c"        # lui at,0x8030
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CA60
+expected = "8a 13 a2 24"
+replace = "f2 23 a2 24"        # addiu v0,a1,9202 (list end)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAB0
+expected = "c4 09 62 28"
+replace = "f8 11 62 28"        # slti v0,v1,4600 (pieces)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004CAD4
+expected = "00 45 20 a4"
+replace = "f0 23 20 a4"        # sh zero,0x23F0(at) (terminator)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004918C
+expected = "0d 80 03 3c"
+replace = "30 80 03 3c"        # lui v1,0x8030 (free loop)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80049190
+expected = "02 45 63 24"
+replace = "f2 23 63 24"        # addiu v1,v1,0x23F2 (list end)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80049238
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004923C
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80049248
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004924C
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80049258
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004925C
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80049268
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004926C
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D270
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D274
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D27C
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D280
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D28C
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D290
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D298
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D29C
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5D8
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5DC
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5E4
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5E8
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5F4
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D5F8
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D600
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005D604
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA74
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA78
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA80
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA84
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA90
+expected = "1d 80 02 3c"
+replace = "24 80 02 3c"        # lui v0,0x8024 (piece buffer B)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA94
+expected = "8c 76 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DA9C
+expected = "1a 80 02 3c"
+replace = "20 80 02 3c"        # lui v0,0x8020 (piece buffer A)
+when = { polygon_pool = "expanded" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8005DAA0
+expected = "d0 57 42 24"
+replace = "00 00 42 24"        # addiu v0,v0,0x0000
+when = { polygon_pool = "expanded" }
+
+# Track draw distance. "full" (doubled distance, per-area visibility bitmaps
+# ignored) is compiled into the game code (game.toml [[recompiler.patch]]),
+# because the object-list builders run every frame and a RAM patch would
+# send them through the interpreter (a hitch whenever the camera turns).
+# "original" and "extended" are RAM patches that put the stock behaviour back
+# with a second encoding of the same instruction (addiu -> ori, beq rs/rt
+# swapped), so they differ from the stock image and run interpreted.
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010174
+expected = "60 00 13 3c"
+replace = "5f 00 13 3c"        # lui s3,0x5F (stock 0x60; lui has no second encoding)
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010474
+expected = "80 c1 28 21"
+replace = "80 c1 28 25"        # addiu t0,t1,-16000 (= stock addi)
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010114
+expected = "f6 ff 20 13"
+replace = "f6 ff 19 10"        # beq zero,t9,skip (= stock beq t9,zero)
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010418
+expected = "f6 ff 20 13"
+replace = "f6 ff 19 10"        # beq zero,t9,skip
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004C384
+expected = "d0 07 04 24"
+replace = "d0 07 04 34"        # ori a0,zero,2000 (= stock addiu)
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004C3B0
+expected = "af 04 02 24"
+replace = "af 04 02 34"        # ori v0,zero,1199
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004C360
+expected = "d0 07 03 24"
+replace = "d0 07 03 34"        # ori v1,zero,2000
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x8004C364
+expected = "ac 0d 03 24"
+replace = "ac 0d 03 34"        # ori v1,zero,3500
+when = { track_detail = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010114
+expected = "f6 ff 20 13"
+replace = "f6 ff 19 10"        # beq zero,t9,skip (keep the visibility bitmaps)
+when = { track_detail = "extended" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80010418
+expected = "f6 ff 20 13"
+replace = "f6 ff 19 10"        # beq zero,t9,skip (keep the visibility bitmaps)
+when = { track_detail = "extended" }
+
+# Race progress bar position: "lower" (base line 215 instead of 207, rope at
+# 0x80039E40 and faces at 0x80037F68) is compiled in; "original" restores 207
+# with ori.
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80039E40
+expected = "cf 00 13 24"
+replace = "cf 00 13 34"        # ori s3,zero,207
+when = { minimap_position = "original" }
+
+[[patch]]
+feature = "widescreen"
+target = "main_exe"
+address = 0x80037F68
+expected = "cf 00 09 24"
+replace = "cf 00 09 34"        # ori t1,zero,207
+when = { minimap_position = "original" }

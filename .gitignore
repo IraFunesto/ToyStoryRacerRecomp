@@ -85,3 +85,35 @@ starvation_dump.jsonl
 !/catalog_identity.json
 !/disc_probe.json
 !/.recomp.json
+
+# Disc file overrides (files extracted from the user's own discs, e.g. the USA maps)
+disc_override/
+
+# The developer's play folder lives in the project root: local executables,
+# backups, logs and scratch files
+/*.exe
+/*.bat
+/*.ini
+*.bak
+*.bak[0-9]*
+/game.toml.*
+/manifest.toml.*
+/CMakeLists.txt.bak
+/mods/state.toml*
+/mods/bundled*/
+/mods/README.md
+/dis_*.txt
+/scan*.txt
+/mipsdis.py
+/psx_*.txt
+/psxrecomp_*.txt
+/settings.toml*
+/cache/
+/overlay_toolchain/
+/overlay_captures.json.d/
+/assets/fonts/
+/assets/img/
+/licenses/
+/tools/experiments/
+/tools/pool_*_sites.txt
+/tools/overclock_slider.pyw

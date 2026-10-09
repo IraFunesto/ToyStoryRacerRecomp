@@ -1,0 +1,4 @@
+Box art: front cover of Disney-Pixar Toy Story Racer (PlayStation, USA release),
+provided by the project owner.
+PNG is for README; TGA is for recomp-ui LAUNCHER_BOXART.
+App icon (assets/psxrecomp.ico / .png): the Toy Story Racer logo.

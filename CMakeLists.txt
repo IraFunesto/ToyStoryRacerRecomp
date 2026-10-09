@@ -42,12 +42,23 @@ psxrecomp_add_game_runtime(psx-runtime
     WINDOW_TITLE "ToyStoryRacer Recompiled"
     DEFAULT_GAME_CONFIG_PATH "game.toml"
     MAX_PLAYERS 2
-    # LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
+    LAUNCHER_BOXART "${CMAKE_CURRENT_SOURCE_DIR}/launcher_assets/img/boxart.tga"
     APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/psxrecomp.ico"
     GEN_MARKER "generated/SLES_033.98_dispatch.c"
     GEN_FULL_GLOB "generated/SLES_033.98_full_*.c"
     CODEGEN_SETUP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/codegen_setup.c"
 )
+
+# The PGXP variant (-DPSX_PGXP_VARIANT=ON) stages the same mods/bundled as the
+# base exe: run its staging only after the base catalog is staged and checked,
+# so a parallel build does not wipe the folder under the other target.
+function(_tsr_serialize_pgxp_stage)
+    if(TARGET psx-runtime-pgxp_mod_catalog_stage AND TARGET psx-runtime_mod_catalog_check)
+        add_dependencies(psx-runtime-pgxp_mod_catalog_stage psx-runtime_mod_catalog_check)
+    endif()
+endfunction()
+cmake_language(DEFER CALL _tsr_serialize_pgxp_stage)
+
 
 # Stage runtime configs next to the exe for direct build/ launches. Only copy
 # files that exist — never fail POST_BUILD when game_options.toml is absent.
@@ -61,3 +72,13 @@ foreach(_PSX_RUNTIME_CONFIG game.toml game_options.toml)
             VERBATIM)
     endif()
 endforeach()
+
+# Game-owned trusted plugin: selects 21:9 for the toystoryracer.widescreen package.
+target_sources(psx-runtime PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c")
+if(TARGET psx-runtime-pgxp)
+    target_sources(psx-runtime-pgxp PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c")
+endif()

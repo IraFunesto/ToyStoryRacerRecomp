@@ -1,0 +1,1042 @@
+diff --git a/recompiler/src/code_generator.cpp b/recompiler/src/code_generator.cpp
+index b2eb1a80..53606b8a 100644
+--- a/recompiler/src/code_generator.cpp
++++ b/recompiler/src/code_generator.cpp
+@@ -817,6 +817,12 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
+             // (b) explicit [widescreen.cull] bltz_sites — the left-edge
+             // counterpart to slti_sites, for X-only funnels auto_screen_x can't
+             // qualify (whose bltz would otherwise never be widened).
++            // screen_x_sites on a `bltz rs,skip` whose operand is a screen X
++            // shifted into the high half (`sll rs,sx,16`): taken only left of
++            // the revealed edge. Identity at 4:3.
++            if (regimm_op == 0x00 && config_.ws_cull_screen_x_sites.count(addr))
++                return fmt::format("psx_ws_cull_bltz16({}) /* ws cull (left edge, X in high half) */",
++                                   reg_name(rs));
+             if (regimm_op == 0x00 &&
+                 (ws_cull_bltz_pcs_.count(addr) || config_.ws_cull_bltz_sites.count(addr)))
+                 return fmt::format("psx_ws_cull_bltz({}) /* ws cull (left edge) */",
+@@ -1284,9 +1290,17 @@ std::string CodeGenerator::translate_instruction(uint32_t addr, uint32_t instr)
+             return fmt::format("{} = psx_ws_cull_sltiu({}, {});"
+                                " /* ws explicit screen-x cull */{}",
+                                reg_name(rt), reg_name(rs), imm, comment);
++        } else if (opcode == 0x0F) {  // lui rt,W: a right screen edge held in the high half
++            uint32_t rt = get_rt(instr);
++            uint16_t imm = get_imm16_u(instr);
++            return fmt::format("{} = psx_ws_edge16({}u);"
++                               " /* ws screen-x edge in the high half */{}",
++                               reg_name(rt), (unsigned)imm, comment);
++        } else if (opcode == 0x01) {
++            // bltz on X<<16: widened in generate_branch_condition.
+         } else if (!config_.overlay_mode) {
+             fmt::print(stderr, "ERROR: [widescreen.cull] screen_x site 0x{:08X} "
+-                       "is not sltiu (opcode 0x{:02X})\n", addr, opcode);
++                       "is not sltiu, lui or bltz (opcode 0x{:02X})\n", addr, opcode);
+             std::exit(1);
+         }
+         // Overlay variant: the configured main-EXE PC holds different code.
+@@ -3417,6 +3431,8 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
+     ss << "extern int  psx_ws_cull_slti(uint32_t sx, uint32_t imm);   /* ws cull signed right edge (gpu.c) */\n";
+     ss << "extern int  psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm); /* ws cull signed lower edge (gpu.c) */\n";
+     ss << "extern int  psx_ws_cull_bltz(uint32_t v);                  /* ws cull signed left edge (gpu.c) */\n";
++    ss << "extern uint32_t psx_ws_edge16(uint32_t imm);               /* ws screen edge << 16, widened (gpu.c) */\n";
++    ss << "extern int  psx_ws_cull_bltz16(uint32_t v);                /* ws cull left edge, X in high half (gpu.c) */\n";
+     ss << "extern int  psx_ws_cull_bgez(uint32_t v);                  /* ws cull signed left keep (gpu.c) */\n";
+     ss << "extern uint32_t psx_ws_clip_edge_x(uint32_t v, uint32_t w); /* ws cull clip-edge bound load (gpu.c) */\n";
+     ss << "extern int  psx_ws_cull_vxrange(uint32_t x, uint32_t imm); /* ws masked-u16 X window */\n";
+diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
+index ff75e9c3..84155f71 100644
+--- a/runtime/include/iso_reader.h
++++ b/runtime/include/iso_reader.h
+@@ -73,6 +73,7 @@ struct BinSegment {
+     uint32_t      start_lba;     // disc sector of this file's first stored sector
+     uint32_t      sector_count;  // sectors stored in this file
+     bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
++    std::vector<uint8_t> data;   // whole file in memory (empty = read from file)
+ };
+ 
+ /**
+diff --git a/runtime/include/mod_memory.h b/runtime/include/mod_memory.h
+index 93c8de19..bc9de540 100644
+--- a/runtime/include/mod_memory.h
++++ b/runtime/include/mod_memory.h
+@@ -51,6 +51,7 @@ static inline uint32_t psx_mod_gpu_dma_resolve_address_for(
+ 
+ uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t size, uint32_t alignment);
+ uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address);
++uint8_t *psx_mod_gpu_dma_host_ptr(uint32_t address, uint32_t size);
+ uint32_t psx_mod_memory_alloc(uint32_t size, uint32_t alignment);
+ /* Allocations are fixed during activation. Snapshot allocated bytes, never
+  * host pointers; immutable host assets are reconstructed separately. */
+diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
+index 471041bd..5d32243d 100644
+--- a/runtime/include/mod_plugins.h
++++ b/runtime/include/mod_plugins.h
+@@ -105,6 +105,9 @@ int32_t psx_mod_widescreen_x_margin(void);
+  * compositor translates it by the live reveal, excluding culling guards.
+  * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
+ void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
++/* Callback run when the guest starts a linked-list GPU DMA (DrawOTag), before
++ * its packets are walked (NULL clears). */
++void psx_mod_set_linked_list_hook(void (*hook)(void));
+ /* Exclude a known world packet from screen-space backdrop stretching, even
+  * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
+ void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
+@@ -340,6 +343,19 @@ enum {
+ };
+ uint32_t psx_mod_render_pass_status(void);
+ int psx_mod_set_auto_skip_fmv(int enabled);
++/* Force port 1's button word (active-low; -1 releases it). */
++void psx_mod_set_pad_override(int buttons);
++/* Ordering-table depth for game primitives (OpenGL): while a native-depth
++ * view is being drawn, a game primitive linked from OT entry i is depth
++ * tested (not written) at q[i] (same scale as the HTP2 suffix: near/z,
++ * 1 = nearest; <= 0 = untested), so game objects behind natively drawn
++ * scenery are hidden. The table is shared by every OT registered with
++ * psx_mod_add_ot_depth_base (the last four are kept). */
++void psx_mod_set_ot_depth_table(const float* q, uint32_t entries);
++void psx_mod_add_ot_depth_base(uint32_t ot_base);
++/* q = near_z / z; the entry depth is tested at z * (1 - rel) - abs, blended
++ * primitives also nearer by half their screen size * z / focal. */
++void psx_mod_set_ot_depth_params(float near_z, float focal, float rel, float abs_margin);
+ /*
+  * Draw still artwork behind the game image in OpenGL letterbox/pillarbox
+  * margins. The image path is an owner-selected mod resource; with no enabled
+diff --git a/runtime/include/mod_texture_banks.h b/runtime/include/mod_texture_banks.h
+index ed80c0a3..f5a49546 100644
+--- a/runtime/include/mod_texture_banks.h
++++ b/runtime/include/mod_texture_banks.h
+@@ -6,6 +6,9 @@ extern "C" {
+ const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* width, uint32_t* height);
+ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_t count);
+ int mod_texture_packet_precision(uint32_t source, float q[3], float xy[6]);
++/* Depth mode of the last successful precision lookup (0 none, 1 native
++ * depth, 2 native depth + new view). */
++int mod_texture_packet_depth_mode(void);
+ int mod_texture_bank_batchable(int immutable, int mask_check, int semi);
+ #ifdef __cplusplus
+ }
+diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
+index f12160a7..e81badf5 100644
+--- a/runtime/src/cdrom.c
++++ b/runtime/src/cdrom.c
+@@ -1505,7 +1505,9 @@ static int read_sector_at(int min, int sec, int sect) {
+ 
+     if (delivery.data_delivered) {
+         memcpy(last_sector_buffer, wb->data, (size_t)wb->size);
+-        burst_note_sector();
++        /* data sectors interleaved in an XA-mode stream (lip-sync/aux data
++         * next to the menu music and voices) are not a load */
++        if (!(mode_reg & 0x40u)) burst_note_sector();
+         if (s_warm_route_active) s_warm_route_sectors++;
+     } else {
+         uint32_t copy_size = history_size < SECTOR_BUFFER_SIZE ? (uint32_t)history_size
+@@ -2056,7 +2058,14 @@ static void queue_or_exec_command(uint8_t cmd) {
+  * async CD queue never pumping the next file). Hence also NO apply_speed():
+  * disc-speed divisors / 'instant' mode must never compress this latency back
+  * into the race window. Call BEFORE stop_read_stream()/CDSTAT_READ clear. */
++int g_psx_cd_pause_cycles_cap = -1;
++
+ static int pause_complete_delay_cycles(void) {
++    /* Game mods may cap this (g_psx_cd_pause_cycles_cap >= 0) when the title
++     * blocks its main loop on the Pause completion and the wait shows as a
++     * dropped frame; -1 keeps the hardware latency. */
++    if (g_psx_cd_pause_cycles_cap >= 0)
++        return g_psx_cd_pause_cycles_cap;
+     if (!reading && !(stat_reg & (CDSTAT_READ | CDSTAT_PLAY)))
+         return 5000;
+     int lba = reading ? msf_to_lba(read_min, read_sec, read_sect)
+@@ -3246,6 +3255,12 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
+  * must stay authentic. */
+ int cdrom_load_in_progress(void) {
+     if (xa_stream_active) return 0;
++    /* A read started in XA-ADPCM mode (mode bit 6) is an audio stream, even
++     * before its first XA sector arrives (seek, leading data sectors): not a
++     * load. Counting it engaged turbo-through-loads for a moment whenever a
++     * voice clip started, and turbo presents only 1 frame in 30 -- a visible
++     * freeze of the picture (Toy Story Racer menus). */
++    if (reading && (mode_reg & 0x40u)) return 0;
+     if (reading) return 1;
+     if (s_burst_count > 0) {
+         const CdBurst *b = &s_bursts[(s_burst_count - 1u) % CD_BURST_CAP];
+@@ -3256,7 +3271,7 @@ int cdrom_load_in_progress(void) {
+ }
+ 
+ int cdrom_data_read_active(void) {
+-    return reading && !xa_stream_active;
++    return reading && !xa_stream_active && !(mode_reg & 0x40u);
+ }
+ 
+ /* Savestate post-load: authentic CD second-response delays (ReadTOC ~30M
+diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
+index b8ff2ff7..e343aa24 100644
+--- a/runtime/src/debug_server.c
++++ b/runtime/src/debug_server.c
+@@ -9787,6 +9787,43 @@ static void handle_card_trace_dump(int id, const char *json)
+     free(out);
+ }
+ 
++#ifndef PSX_NO_DEBUG_TOOLS
++/* RAM read trace for the dirty-RAM interpreter (DIRTY_RTRACE): run with
++ * PSX_FORCE_INTERP=1 so every guest load is interpreted, arm wtrace ranges,
++ * then `rtrace_ram {"on":1}`. Loads inside an armed range land in the wtrace
++ * ring with the load's PC and width | 0x80 (old_val = 0xFFFFFFFF). */
++int g_debug_rtrace_ram_on = 0;
++void debug_server_trace_read(uint32_t pc, uint32_t addr)
++{
++    uint32_t phys = addr & 0x1FFFFFFFu;
++    for (int i = 0; i < s_wtrace_range_count; i++) {
++        if (phys >= s_wtrace_ranges[i].lo && phys < s_wtrace_ranges[i].hi) {
++            uint32_t saved = g_debug_last_store_pc;
++            g_debug_last_store_pc = pc;
++            wtrace_record(phys, 0xFFFFFFFFu, 0u, 0x80u);
++            g_debug_last_store_pc = saved;
++            return;
++        }
++    }
++}
++
++static void handle_overclock(int id, const char *json)
++{
++    extern uint32_t g_psx_cpu_overclock_override;
++    extern uint32_t g_psx_cpu_overclock_pct;
++    int v = json_get_int(json, "pct", -1);
++    if (v >= 0 && v <= 1000) g_psx_cpu_overclock_override = (uint32_t)v;
++    send_fmt("{\"id\":%d,\"ok\":true,\"override\":%u,\"active\":%u}", id,
++             g_psx_cpu_overclock_override, g_psx_cpu_overclock_pct);
++}
++
++static void handle_rtrace_ram(int id, const char *json)
++{
++    g_debug_rtrace_ram_on = json_get_int(json, "on", 0) != 0;
++    send_fmt("{\"id\":%d,\"ok\":true,\"on\":%d}", id, g_debug_rtrace_ram_on);
++}
++#endif
++
+ /* Multi-range check called from memory.c write paths.
+  * Iterates up to 8 ranges; records if any match.
+  * The always-on catch-all ring is recorded UNCONDITIONALLY first so
+@@ -14140,6 +14177,10 @@ static const CmdEntry s_commands[] = {
+     { "wtrace_disarm",       handle_wtrace_del },
+     { "wtrace_disarm_all",   handle_wtrace_disarm_all },
+     { "wtrace_reset",        handle_wtrace_clear },
++#ifndef PSX_NO_DEBUG_TOOLS
++    { "rtrace_ram",          handle_rtrace_ram },
++    { "overclock",           handle_overclock },
++#endif
+     { "wtrace_ranges",       handle_wtrace_ranges },
+     { "wtrace_dump",         handle_wtrace_dump },
+     { "cdrom_timing_dump",   handle_cdrom_timing_dump },
+diff --git a/runtime/src/dirty_ram_interp.c b/runtime/src/dirty_ram_interp.c
+index ef6158b7..80f0e4e3 100644
+--- a/runtime/src/dirty_ram_interp.c
++++ b/runtime/src/dirty_ram_interp.c
+@@ -992,8 +992,20 @@ static int psx_mixed_owner_enabled(void) {
+     return v;
+ }
+ 
++/* Debug read trace (debug_server.c rtrace_ram): with PSX_FORCE_INTERP=1 every
++ * guest load runs here, so loads in the armed wtrace ranges are recorded with
++ * their PC. Compiled out of production builds. */
++#ifndef PSX_NO_DEBUG_TOOLS
++extern int g_debug_rtrace_ram_on;
++void debug_server_trace_read(uint32_t pc, uint32_t addr);
++#define DIRTY_RTRACE(pc, addr) do { if (g_debug_rtrace_ram_on) debug_server_trace_read((pc), (addr)); } while (0)
++#else
++#define DIRTY_RTRACE(pc, addr) ((void)0)
++#endif
++
+ #ifdef _WIN32
+ #include <intrin.h>   /* __readgsqword — fiber TEB StackBase */
++
+ static size_t interp_host_stack_used(void) {
+     char probe;
+     uintptr_t base = (uintptr_t)__readgsqword(0x08);   /* TEB StackBase (high end) */
+@@ -2265,6 +2277,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+      * accessor (psx_cyc_load_* falls back to a plain read when cycles are off). */
+     case 0x20: { /* LB rt, simm(rs) */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         cpu->gpr[rt] = (uint32_t)(int32_t)(int8_t)psx_cyc_load_byte(cpu, addr, rt, 1u << rs);
+         psx_pgxp_load(cpu, insn, addr, cpu->gpr[rt]);
+         cpu->gpr[0] = 0;
+@@ -2272,6 +2285,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x21: { /* LH */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         if (addr & 1) return interp_exception(cpu, 4, addr, pc);  /* LoadAddressError */
+         cpu->gpr[rt] = ws_clip_edge_load(pc,
+             (uint32_t)(int32_t)(int16_t)psx_cyc_load_half(cpu, addr, rt, 1u << rs));
+@@ -2281,6 +2295,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x22: { /* LWL */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         uint32_t word = psx_cyc_load_word(cpu, addr & ~3u, rt, 1u << rs);
+         cpu->gpr[rt] = lwl_merge(addr, word, cpu->gpr[rt]);
+         psx_pgxp_load(cpu, insn, addr, cpu->gpr[rt]);
+@@ -2289,6 +2304,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x23: { /* LW */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         if (addr & 3) return interp_exception(cpu, 4, addr, pc);  /* LoadAddressError */
+         if (psx_ws_is_cull_plane_nx_site(pc))
+             /* Side-plane normal-X: inverse-aspect scale while revealed. */
+@@ -2306,6 +2322,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x24: { /* LBU */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         cpu->gpr[rt] = (uint32_t)psx_cyc_load_byte(cpu, addr, rt, 1u << rs);
+         psx_pgxp_load(cpu, insn, addr, cpu->gpr[rt]);
+         cpu->gpr[0] = 0;
+@@ -2313,6 +2330,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x25: { /* LHU */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         if (addr & 1) return interp_exception(cpu, 4, addr, pc);  /* LoadAddressError */
+         cpu->gpr[rt] = ws_clip_edge_load(pc,
+             (uint32_t)psx_cyc_load_half(cpu, addr, rt, 1u << rs));
+@@ -2322,6 +2340,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x26: { /* LWR */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+         uint32_t word = psx_cyc_load_word(cpu, addr & ~3u, rt, 1u << rs);
+         cpu->gpr[rt] = lwr_merge(addr, word, cpu->gpr[rt]);
+         psx_pgxp_load(cpu, insn, addr, cpu->gpr[rt]);
+@@ -2375,6 +2394,7 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
+     }
+     case 0x32: { /* LWC2 — §1+DO_LDS charged by exec_one's top step (mask 0) */
+         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
++        DIRTY_RTRACE(pc, addr);
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+         psx_gte_stall(cpu);   /* COP2 reg write stalls to GTE completion */
+ #endif
+diff --git a/runtime/src/dma.c b/runtime/src/dma.c
+index a75dc88b..4575b8c0 100644
+--- a/runtime/src/dma.c
++++ b/runtime/src/dma.c
+@@ -717,6 +717,23 @@ static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
+ 
+     gpu_ws_validate_linked_list_node(addr, num_words);
+     gpu_set_gp0_linked_list_node(addr, num_words);
++    if (num_words) {
++        /* A drawing chain never starts a packet with a VRAM->CPU read
++         * (GP0 C0h-DFh) or an undefined opcode: such a node is corrupt game
++         * data (Toy Story Racer's Pier sea grid, one block of which the game
++         * relocates wrongly, builds quads whose command byte is a colour
++         * overflow). Skip the whole node, keeping the chain, instead of
++         * letting the GPU parse its coordinates as commands. */
++        uint32_t op = psx_read_word(addr + 4u) >> 24;
++        if ((op >= 0xC0u && op <= 0xDFu) || (op >= 0x03u && op <= 0x1Eu) ||
++            op == 0xE0u || op >= 0xE7u) {
++            static unsigned warned;
++            if (warned++ < 8)
++                fprintf(stderr, "dma: skipped corrupt GPU packet at 0x%08X (%u words, opcode 0x%02X)\n",
++                        addr, num_words, op);
++            return 0;
++        }
++    }
+     return 1;
+ }
+ 
+diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
+index b2857352..10e9751d 100644
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -1562,6 +1562,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
+ int psx_ws_cull_bltz(uint32_t v) {
+     return ((int32_t)v < -psx_ws_x_margin()) ? 1 : 0;
+ }
++/* screen_x_sites on `lui rt,W`: a right screen edge held in the high half.
++ * Move it out by the live margin. Identity at margin 0 (4:3). */
++uint32_t psx_ws_edge16(uint32_t imm) {
++    return (uint32_t)(((int32_t)imm + psx_ws_x_margin()) * 65536);
++}
++/* screen_x_sites on `bltz rs,skip` where rs = X<<16: taken only left of the
++ * revealed edge (X < -margin). Identity at margin 0 (4:3). */
++int psx_ws_cull_bltz16(uint32_t v) {
++    return ((int32_t)v < -(psx_ws_x_margin() * 65536)) ? 1 : 0;
++}
+ int psx_ws_cull_vxrange(uint32_t x, uint32_t imm) {
+     int32_t margin = psx_ws_x_margin();
+     uint32_t bound = (uint32_t)(int32_t)(int16_t)(uint16_t)imm;
+@@ -2856,12 +2866,55 @@ static void ws_clear_tagged_rect_reveal(int y, int h) {
+  * a guessed finite-map side here: MMX6's authored layers enter the reveal at
+  * different times, so the side guess produced a moving black trim over valid
+  * stage art. A stale reveal tile is safer than deleting submitted content. */
++/* Plugin OT depth (psx_mod_set_ot_depth_table): q per OT entry, shared by
++ * up to four OT bases (RAM offsets). */
++#define OTD_MAX 8192u
++static float    s_otd_q[OTD_MAX];
++static uint32_t s_otd_n;
++static uint32_t s_otd_base[4];
++static unsigned s_otd_next;
++void gl_renderer_set_game_depth(float q);
++void gl_renderer_game_depth_reset(void);
++
++void psx_mod_set_ot_depth_table(const float *q, uint32_t entries) {
++    if (!q || entries > OTD_MAX) entries = 0;
++    if (entries) memcpy(s_otd_q, q, entries * sizeof(float));
++    s_otd_n = entries;
++}
++
++void gl_renderer_set_game_depth_params(float near_z, float focal, float rel, float abs_margin);
++void psx_mod_set_ot_depth_params(float near_z, float focal, float rel, float abs_margin) {
++    gl_renderer_set_game_depth_params(near_z, focal, rel, abs_margin);
++}
++
++void psx_mod_add_ot_depth_base(uint32_t ot_base) {
++    ot_base &= 0x1FFFFFu;
++    for (unsigned i = 0; i < 4u; i++) if (s_otd_base[i] == ot_base) return;
++    s_otd_base[s_otd_next++ & 3u] = ot_base;
++}
++
++/* Plugin callback run when the guest starts a linked-list GPU DMA (DrawOTag),
++ * before any packet is walked: last chance to tag the frame's packets. */
++static void (*s_ll_hook)(void);
++void psx_mod_set_linked_list_hook(void (*hook)(void)) { s_ll_hook = hook; }
++
+ void gpu_ws_begin_linked_list(void) {
++    if (s_ll_hook) s_ll_hook();
+     gp0_ot_rank = 0xFFFFu;
++    gl_renderer_game_depth_reset();
+ }
+ 
+ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
+-    (void)addr;
++    if (word_count == 0 && s_otd_n) {
++        uint32_t a = addr & 0x1FFFFFu;
++        for (unsigned i = 0; i < 4u; i++) {
++            uint32_t b = s_otd_base[i];
++            if (b && a >= b && ((a - b) & 3u) == 0u && (a - b) / 4u < s_otd_n) {
++                gl_renderer_set_game_depth(s_otd_q[(a - b) / 4u]);
++                break;
++            }
++        }
++    }
+     if (word_count == 0) {
+         gp0_ot_rank = gp0_ot_rank == 0xFFFFu ? 0u
+                                              : (uint16_t)(gp0_ot_rank + 1u);
+@@ -2870,6 +2923,7 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
+ 
+ void gpu_ws_end_linked_list(void) {
+     gp0_ot_rank = 0xFFFFu;
++    gl_renderer_game_depth_reset();
+ }
+ 
+ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
+@@ -4251,6 +4305,8 @@ static void gp0_exec_textured_quad(void) {
+     }
+ }
+ 
++void gl_renderer_set_native_depth(int mode);
++
+ /* Execute shaded textured triangle (GP0 0x34-0x37) */
+ static void gp0_exec_shaded_textured_tri(void) {
+     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
+@@ -4291,9 +4347,13 @@ static void gp0_exec_shaded_textured_tri(void) {
+     prepare_precise_triangle(1, 4, 7,
+                              vx, vy);
+     prepare_texture_triangle(1, 4, 7);
+-    if (host_bank) {
++    /* Mod packet arenas carry an exact-position trailer for VRAM-textured
++     * triangles too (a native scene renderer), not only for host banks. */
++    int native_depth = 0;
++    {
+         float q[3], xy[6];
+         if (mod_texture_packet_precision(gp0_cmd_source_addr, q, xy)) {
++            native_depth = mod_texture_packet_depth_mode();
+             gr_set_precise_triangle(1,
+                 (int32_t)((xy[0] + draw_offset_x) * 65536.0f),
+                 (int32_t)((xy[1] + draw_offset_y) * 65536.0f),
+@@ -4304,10 +4364,14 @@ static void gp0_exec_shaded_textured_tri(void) {
+             gr_set_perspective_triangle(1, q[0], q[1], q[2]);
+         }
+     }
++    if (native_depth && gr_backend() == GR_BACKEND_OPENGL)
++        gl_renderer_set_native_depth(native_depth);
+     gr_draw_shaded_textured_triangle(vx[0], vy[0], u[0], v[0], c[0],
+                                      vx[1], vy[1], u[1], v[1], c[1],
+                                      vx[2], vy[2], u[2], v[2], c[2],
+                                      clut_x, clut_y, tpage, raw_texture);
++    if (native_depth && gr_backend() == GR_BACKEND_OPENGL)
++        gl_renderer_set_native_depth(0);
+     if (host_bank) (void)gl_renderer_select_texture_bank(0);
+ }
+ 
+@@ -5900,11 +5964,13 @@ static void gpu_write_gp0_body(uint32_t val) {
+     int word_count = gp0_command_word_count(opcode);
+ 
+     if (word_count == 0) {
+-        /* Unknown command — fatal halt with rings queryable post-mortem */
+-        static char reason[96];
+-        snprintf(reason, sizeof(reason),
+-                 "GPU GP0 unknown command 0x%02X (word 0x%08X)", opcode, val);
+-        psx_fatal_halt(reason);
++        /* Unknown command: the PS1 GPU ignores undefined opcodes (NOP), so a
++         * stray word from corrupt game data costs a glitch, not the game.
++         * Report the first few. */
++        static unsigned warned;
++        if (warned++ < 8)
++            fprintf(stderr, "GPU GP0 unknown command 0x%02X (word 0x%08X) ignored\n", opcode, val);
++        return;
+     }
+ 
+     if (word_count < 0) {
+diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
+index 44ac6bbb..bd948948 100644
+--- a/runtime/src/gpu_gl_renderer.c
++++ b/runtime/src/gpu_gl_renderer.c
+@@ -533,7 +533,7 @@ static GLuint s_tex_prog = 0, s_tex_vao = 0, s_tex_vbo = 0;
+  * PS1-faithful default, which makes the vertex shader's w exactly 1.0 and the
+  * fragment shader read the noperspective varying — i.e. bit-identical to the
+  * pre-feature pipeline. */
+-#define TEXV 20
++#define TEXV 21
+ static GLuint s_blit_prog = 0, s_blit_vao = 0, s_blit_vbo = 0;
+ static GLuint s_blit_hi_prog = 0;            /* windowed hi surface blit */
+ static GLint  s_uBhSrc = -1, s_uBhPass = -1, s_uBhMaskset = -1, s_uBhSrcDiv = -1;
+@@ -564,6 +564,7 @@ static GLint s_uLimits = -1;
+  * bit-identical to the pre-native-wide projection. */
+ static GLint s_geo_uXoff = -1, s_geo_uXhalf = -1;
+ static GLint s_tex_uXoff = -1, s_tex_uXhalf = -1;
++static GLint s_tex_uZmode = -1;
+ /* Native-wide 2D-backdrop x-stretch uniforms. The far 2D backdrop layer is a
+  * ~4:3-width set of static prims scrolled by the draw offset; native-wide widens
+  * 3D via the GTE but never these, so they leave a void in the 16:9 margins. The
+@@ -1272,11 +1273,13 @@ static const char *TEX_VS =
+     "layout(location=7) in vec4 a_limits;\n"
+     "layout(location=8) in float a_semi;\n"
+     "layout(location=9) in float a_q;   /* persp weight; 0 = affine (default) */\n"
++    "layout(location=10) in float a_gz; /* game prim OT depth (near/z), u_zmode 2 */\n"
+     "uniform float u_shift;\n"
+     "uniform float u_xoff;   /* native-wide x translation (px); 0 canonical */\n"
+     "uniform float u_xhalf;  /* x clip half-extent (px); 512 canonical */\n"
+     "uniform float u_xscale; /* native-wide 2D-backdrop x-stretch; 1 canonical */\n"
+     "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
++    "uniform int u_zmode;    /* 1: native-depth batch, depth = 1 - a_q (a_q = near/z); 2: = 1 - a_gz */\n"
+     "noperspective out vec2 v_uv; noperspective out vec4 v_col;\n"
+     "smooth out vec2 v_uv_p;  /* perspective-correct UV (used when v_persp!=0) */\n"
+     "flat out int v_persp;\n"
+@@ -1302,7 +1305,8 @@ static const char *TEX_VS =
+     "   * a_q == 0 (feature off) w is exactly 1.0 and this is the old expression. */\n"
+     "  float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;\n"
+     "  vec2 ndc = vec2((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0);\n"
+-    "  gl_Position = vec4(ndc * w, 0.0, w); }\n";
++    "  float zn = (u_zmode == 1) ? (1.0 - 2.0 * a_q) : (u_zmode == 2) ? (1.0 - 2.0 * a_gz) : 0.0;\n"
++    "  gl_Position = vec4(ndc * w, zn * w, w); }\n";
+ static const char *TEX_FS =
+     "#version 330\n"
+     "noperspective in vec2 v_uv; noperspective in vec4 v_col;\n"
+@@ -2454,6 +2458,28 @@ static int   s_tb_semi = -2;
+ static int   s_tb_mask = 0, s_tb_filter = 0;
+ static GLuint s_tb_bank_tex;
+ static int   s_tb_twin[4] = {0, 0, 0, 0};
++/* Native-depth triangles (a mod scene renderer's packets, flagged in their
++ * precision suffix): depth-tested and depth-written against each other in the
++ * otherwise unused depth half of the target's depth-stencil buffer, so the
++ * painter-ordered OT cannot let a hidden room poke through a wall. Every other
++ * primitive keeps the PS1 painter behaviour (depth test off). */
++/* A view start clears both the canonical target and the native-wide mirror
++ * surface (separate depth buffers). */
++static int   s_nd_mode = 0, s_tb_nd = 0, s_nd_clear_pending = 0, s_nd_clear_wide = 0;
++/* Game primitives inside a native-depth view: depth tested (not written)
++ * at their OT entry's depth (plugin table, see gpu.c). Valid from the
++ * view's native depth clear to the end of the linked list. */
++static float s_gd_q = -1.0f;
++static int   s_gd_valid = 0;
++static float s_gd_near = 24.0f, s_gd_focal = 160.0f, s_gd_rel = 0.03f, s_gd_abs = 16.0f;
++void gl_renderer_set_game_depth_params(float near_z, float focal, float rel, float abs_margin) {
++    if (near_z > 0.0f) s_gd_near = near_z;
++    if (focal > 0.0f) s_gd_focal = focal;
++    s_gd_rel = rel; s_gd_abs = abs_margin;
++}
++void gl_renderer_set_game_depth(float q) { s_gd_q = q; }
++void gl_renderer_game_depth_reset(void) { s_gd_q = -1.0f; s_gd_valid = 0; }
++void gl_renderer_set_native_depth(int mode);
+ static uint64_t s_batch_total = 0, s_batch_reason[7];
+ 
+ void gl_renderer_batch_diag(uint64_t out[8]) {
+@@ -2851,6 +2877,34 @@ static void flush_tex_batch(void) {
+     p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
+     p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
+ 
++    int nd = s_tb_nd, nd_clear = nd == 1 && s_nd_clear_pending;
++    if (nd_clear) s_nd_clear_pending = 0;
++    if (nd == 3) {
++        glEnable(GL_DEPTH_TEST);
++        glDepthFunc(GL_LEQUAL);
++        glDepthMask(GL_FALSE);
++        p_glUniform1i(s_tex_uZmode, 2);
++    } else if (nd) {
++        if (nd_clear) {
++            /* Whole surfaces, not just the scissored draw area: the wide
++             * mirror is wider than the 4:3 draw area, and a view that
++             * starts later in the frame has nothing left to draw in the
++             * others (the OT draws view 2 before view 1). */
++            GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
++            glDisable(GL_SCISSOR_TEST);
++            glDepthMask(GL_TRUE);
++            glClear(GL_DEPTH_BUFFER_BIT);
++            if (sc) glEnable(GL_SCISSOR_TEST);
++            /* The native-wide mirror surface is cleared by the first native
++             * batch of the view that is actually mirrored (it may not be
++             * bound yet here), which is also the first native draw into it. */
++            s_nd_clear_wide = 1;
++        }
++        glEnable(GL_DEPTH_TEST);
++        glDepthFunc(GL_LEQUAL);
++        glDepthMask(semi < 0 ? GL_TRUE : GL_FALSE);
++        p_glUniform1i(s_tex_uZmode, 1);
++    }
+     tex_batch_draw_passes(nverts, semi);
+ 
+     /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
+@@ -2870,15 +2924,43 @@ static void flush_tex_batch(void) {
+         gl_perf_mirror_begin();
+         wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
+         wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
++        if (nd && s_nd_clear_wide) {
++            GLboolean wsc = glIsEnabled(GL_SCISSOR_TEST);
++            glDisable(GL_SCISSOR_TEST);
++            glDepthMask(GL_TRUE);
++            glClear(GL_DEPTH_BUFFER_BIT);
++            glDepthMask((semi < 0 && nd == 1) ? GL_TRUE : GL_FALSE);
++            if (wsc) glEnable(GL_SCISSOR_TEST);
++            s_nd_clear_wide = 0;
++        }
+         if (s_ws_ablate != 2) tex_batch_draw_passes(nverts, semi);
+         wide_clear_bd_scale(s_tex_uXscale, s_tex_uXcenter);
+         wide_target_end(s_tex_uXoff, s_tex_uXhalf);
+         gl_perf_mirror_end();
+     }
++    if (nd) {
++        glDisable(GL_DEPTH_TEST);
++        glDepthMask(GL_TRUE);
++        p_glUniform1i(s_tex_uZmode, 0);
++    }
+     hr_end();
+     if (--s_cw_flush_depth == 0) s_cw_flush_ms += cw_ms() - cw_t0;
+ }
+ 
++/* mode 0: ordinary primitive; 1: native-depth triangle; 2: native-depth
++ * triangle that starts a new view (clear the depth inside the draw area,
++ * which the batch draw scissors to). */
++void gl_renderer_set_native_depth(int mode) {
++    if (mode == 2) {
++        flush_flat_batch();
++        flush_tex_batch();
++        s_nd_clear_pending = 1;
++        s_gd_valid = 1;
++        mode = 1;
++    }
++    s_nd_mode = mode;
++}
++
+ /* Flat / gouraud GEO batch — MotK title/char-select starfields issue ~30k/s
+  * GP0(68h) 1x1 dots; each was two immediate gpu_triangle draws (BufferData +
+  * DrawArrays each). Coalesce opaque/semi-uniform tris into one draw. */
+@@ -3276,6 +3358,28 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+          * on opaque transitions, bank/state changes, masking or subtraction. */
+         int isolate = semi >= 0 &&
+             !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi);
++        /* game primitive inside a native-depth view: OT-depth test */
++        int ndm = s_nd_mode;
++        float gz = 0.0f;
++        if (ndm == 0 && s_gd_valid && s_gd_q > 0.0f && !s_selected_bank_tex) {
++            /* The OT entry gives the polygon's average depth; test it a little
++             * nearer. A blended polygon (shadow, glow, spark) is often flat on
++             * the scenery or crossing it: pull it nearer by up to half its
++             * screen size in depth as well. */
++            float z = s_gd_near / s_gd_q;
++            float zt = z * (1.0f - s_gd_rel) - s_gd_abs;
++            if (semi >= 0) {
++                int x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
++                for (int i = 1; i < 3; i++) {
++                    if (xs[i] < x0) x0 = xs[i]; if (xs[i] > x1) x1 = xs[i];
++                    if (ys[i] < y0) y0 = ys[i]; if (ys[i] > y1) y1 = ys[i];
++                }
++                int ext = (x1 - x0) > (y1 - y0) ? (x1 - x0) : (y1 - y0);
++                zt -= 0.5f * (float)ext * z / s_gd_focal;
++            }
++            ndm = 3;
++            gz = zt <= s_gd_near ? 1.0f : s_gd_near / zt;
++        }
+         int reason = -1;
+         if (s_tb_n > 0) {
+             if (s_tb_bank_tex != s_selected_bank_tex) reason = 0;
+@@ -3284,6 +3388,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+             else if (s_mask_set != s_tb_mask) reason = 2;
+             else if (s_tex_filter != s_tb_filter) reason = 3;
+             else if (gate != s_tb_gate) reason = 4;
++            else if (ndm != s_tb_nd) reason = 4;
+             else if (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
+                      tox != s_tb_twin[2] || toy != s_tb_twin[3]) reason = 5;
+         }
+@@ -3295,6 +3400,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+         if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
+             s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
+             s_tb_bank_tex = s_selected_bank_tex;
++            s_tb_nd = ndm;
+             s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
+         }
+         float *vp = &s_tb[s_tb_n * TEXV];
+@@ -3310,6 +3416,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+             vp[16] = (float)lim[2];  vp[17] = (float)lim[3];
+             vp[18] = semi >= 0 ? (float)(semi + 1) : 0.0f;          /* a_semi code */
+             vp[19] = s_pq_valid ? s_pq[i] : 0.0f;                   /* a_q; 0 = affine */
++            vp[20] = gz;                                            /* a_gz (u_zmode 2) */
+         }
+         s_tb_n += 3;
+         if (isolate) flush_tex_batch();   /* draw this semi prim alone, in submission order */
+@@ -4229,6 +4336,7 @@ static int init_gpu_raster(void) {
+     s_geo_uXoff  = p_glGetUniformLocation(s_geo_prog, "u_xoff");
+     s_geo_uXhalf = p_glGetUniformLocation(s_geo_prog, "u_xhalf");
+     s_tex_uXoff  = p_glGetUniformLocation(s_tex_prog, "u_xoff");
++    s_tex_uZmode = p_glGetUniformLocation(s_tex_prog, "u_zmode");
+     s_tex_uXhalf = p_glGetUniformLocation(s_tex_prog, "u_xhalf");
+     s_geo_uXscale  = p_glGetUniformLocation(s_geo_prog, "u_xscale");
+     s_geo_uXcenter = p_glGetUniformLocation(s_geo_prog, "u_xcenter");
+@@ -4298,6 +4406,7 @@ static int init_gpu_raster(void) {
+         p_glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, st, (void*)(14*sizeof(float))); p_glEnableVertexAttribArray(7); /* limits */
+         p_glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, st, (void*)(18*sizeof(float))); p_glEnableVertexAttribArray(8); /* semi   */
+         p_glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, st, (void*)(19*sizeof(float))); p_glEnableVertexAttribArray(9); /* q      */
++        p_glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, st, (void*)(20*sizeof(float))); p_glEnableVertexAttribArray(10); /* gz */
+     }
+ 
+     p_glGenVertexArrays(1, &s_blit_vao);
+diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
+index af866320..04d90422 100644
+--- a/runtime/src/iso_reader.cpp
++++ b/runtime/src/iso_reader.cpp
+@@ -5,6 +5,7 @@
+ #include <filesystem>
+ #include <algorithm>
+ #include <cstring>
++#include <cstdlib>
+ #include <cstdio>
+ #include <limits>
+ 
+@@ -330,6 +331,19 @@ bool ISOReader::Open(const std::string& filename) {
+         seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
+                                                                  : SECTOR_SIZE));
+         seg.start_lba    = 0;  // assigned by the layout pass below
++        /* Keep the dump in memory (up to 1 GB): a sector read from the file
++         * can block the emulation thread for tens of milliseconds when the
++         * OS has not cached that part of the image yet (a visible hitch when
++         * an XA voice or a level starts). PSX_DISC_NO_PRELOAD=1 disables. */
++        const char* no_pre = std::getenv("PSX_DISC_NO_PRELOAD");
++        if (size <= (1ull << 30) && !(no_pre && no_pre[0] == '1')) {
++            seg.data.resize(static_cast<size_t>(size));
++            seg.file.seekg(0, std::ios::beg);
++            seg.file.read(reinterpret_cast<char*>(seg.data.data()),
++                          static_cast<std::streamsize>(size));
++            if (seg.file.gcount() != static_cast<std::streamsize>(size)) seg.data.clear();
++            seg.file.clear();
++        }
+         segments_.push_back(std::move(seg));
+     }
+ 
+@@ -556,6 +570,15 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+     BinSegment* seg = &segments_[(size_t)span->segment];
+     const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
+ 
++    if (!seg->data.empty()) {
++        const uint64_t off = seg->raw
++            ? static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET
++            : static_cast<uint64_t>(local_lba) * SECTOR_SIZE;
++        if (off + SECTOR_SIZE > seg->data.size()) return false;
++        std::memcpy(buffer, seg->data.data() + off, SECTOR_SIZE);
++        return true;
++    }
++
+     // Clear any error flags from a previous failed read
+     seg->file.clear();
+ 
+@@ -616,6 +639,13 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+     }
+     const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
+ 
++    if (!seg->data.empty()) {
++        const uint64_t off = static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE;
++        if (off + RAW_SECTOR_SIZE > seg->data.size()) return false;
++        std::memcpy(buffer, seg->data.data() + off, RAW_SECTOR_SIZE);
++        return true;
++    }
++
+     seg->file.clear();
+     std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
+     seg->file.seekg(offset, std::ios::beg);
+diff --git a/runtime/src/iso_reader_c.cpp b/runtime/src/iso_reader_c.cpp
+index 0dc8e173..e0c0e460 100644
+--- a/runtime/src/iso_reader_c.cpp
++++ b/runtime/src/iso_reader_c.cpp
+@@ -6,7 +6,99 @@
+ 
+ #include "iso_reader.h"
+ #include "mod_runtime.h"
++#include <cctype>
+ #include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <iterator>
++#include <string>
++#include <vector>
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
++
++namespace {
++
++/* Disc file overrides: a file under "disc_override/" next to the executable
++ * replaces the disc file with the same path (disc_override/COURSE_B/PIER.AXE
++ * -> \COURSE_B\PIER.AXE). It is served from that file's own sectors, so it
++ * must fit in them; the disc's directory keeps the original size. */
++struct DiscOverride {
++    uint32_t lba;
++    uint32_t sectors;
++    std::vector<uint8_t> data;   /* padded to sectors * 2048 */
++};
++std::vector<DiscOverride> g_disc_overrides;
++
++std::filesystem::path disc_override_dir() {
++    namespace fs = std::filesystem;
++    fs::path dir;
++#ifdef _WIN32
++    wchar_t buf[MAX_PATH * 4];
++    DWORD n = GetModuleFileNameW(NULL, buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
++    if (n > 0 && n < (DWORD)(sizeof(buf) / sizeof(buf[0])))
++        dir = fs::path(std::wstring(buf, buf + n)).parent_path();
++#endif
++    if (dir.empty()) dir = fs::path(".");
++    return dir / "disc_override";
++}
++
++void load_disc_overrides(PS1::ISOReader* reader) {
++    namespace fs = std::filesystem;
++    g_disc_overrides.clear();
++    std::error_code ec;
++    const fs::path dir = disc_override_dir();
++    if (!fs::is_directory(dir, ec)) return;
++    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
++        if (!it->is_regular_file(ec)) continue;
++        std::string rel = it->path().lexically_relative(dir).generic_string();
++        std::string disc_path = rel;
++        for (char& c : disc_path) c = (char)std::toupper((unsigned char)c);
++        PS1::ISOFileEntry entry;
++        if (!reader->FindFile(disc_path, entry) || entry.is_directory) {
++            std::fprintf(stderr, "psxrecomp: disc_override: %s is not on the disc, ignored\n",
++                         rel.c_str());
++            continue;
++        }
++        std::ifstream f(it->path(), std::ios::binary);
++        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
++                                  std::istreambuf_iterator<char>());
++        const uint32_t sectors = (entry.size + 2047u) / 2048u;
++        if (data.empty() || data.size() > (size_t)sectors * 2048u) {
++            std::fprintf(stderr, "psxrecomp: disc_override: %s is %zu bytes, the disc has "
++                         "room for %u: ignored\n", rel.c_str(), data.size(), sectors * 2048u);
++            continue;
++        }
++        if (data.size() != entry.size)
++            std::fprintf(stderr, "psxrecomp: disc_override: %s is %zu bytes, the disc's is %u "
++                         "(the game still reads %u)\n", rel.c_str(), data.size(), entry.size,
++                         entry.size);
++        data.resize((size_t)sectors * 2048u, 0);
++        std::fprintf(stderr, "psxrecomp: disc_override: %s replaces LBA %u (%u sectors)\n",
++                     rel.c_str(), entry.lba, sectors);
++        g_disc_overrides.push_back({entry.lba, sectors, std::move(data)});
++        std::fflush(stderr);
++    }
++}
++
++/* the 2048 user bytes of disc sector lba */
++void apply_disc_override(uint32_t lba, uint8_t* user) {
++    for (const DiscOverride& o : g_disc_overrides) {
++        if (lba >= o.lba && lba - o.lba < o.sectors) {
++            std::memcpy(user, o.data.data() + (size_t)(lba - o.lba) * 2048u, 2048u);
++            return;
++        }
++    }
++}
++
++} /* namespace */
+ 
+ extern "C" {
+ 
+@@ -16,6 +108,7 @@ void* iso_open(const char* path) {
+         delete reader;
+         return nullptr;
+     }
++    load_disc_overrides(reader);
+     return reader;
+ }
+ 
+@@ -24,6 +117,7 @@ int iso_read_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
+     auto* reader = static_cast<PS1::ISOReader*>(handle);
+     (void)size; /* ReadSector always reads 2048 bytes */
+     if (!reader->ReadSector(lba, buffer)) return 0;
++    if (!g_disc_overrides.empty()) apply_disc_override(lba, buffer);
+     mod_runtime_patch_disc_sector(lba, 0, buffer, 2048);
+     return 1;
+ }
+@@ -32,6 +126,11 @@ int iso_read_raw_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
+     if (!handle || size < 2352) return 0;
+     auto* reader = static_cast<PS1::ISOReader*>(handle);
+     if (!reader->ReadRawSector(lba, buffer)) return 0;
++    if (!g_disc_overrides.empty()) {
++        /* data sectors only: Mode 1 user data at +16, Mode 2 Form 1 at +24 */
++        if (buffer[15] == 1) apply_disc_override(lba, buffer + 16);
++        else if (buffer[15] == 2 && !(buffer[18] & 0x20u)) apply_disc_override(lba, buffer + 24);
++    }
+     mod_runtime_patch_disc_sector(lba, 1, buffer, 2352);
+     return 1;
+ }
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index a5241863..51d7b603 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -1279,6 +1279,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
+ static int           g_video_win_w    = 0;    /* 0 = fit the display; see clamp_window_aspect */
+ static bool          g_audio_spu_hq   = false; /* SPU float-shadow (env overrides) */
+ static int           g_audio_freq     = 44100; /* host device request */
++extern "C" int g_psx_mod_pad_override;
+ static int           g_auto_skip_fmv  = 0;   /* skip FMVs the instant they're detected */
+ /* Local rewind is opt-in: the snap ring is whole-machine state on a frame
+  * cadence, too much to charge every host for a feature many never open. */
+@@ -1661,6 +1662,14 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
+     return 1;
+ }
+ 
++/* Port-1 pad word a trusted plugin forces for the next samples (active-low
++ * PS1 button word, -1 = none), e.g. to skip attract/intro sequences that
++ * are not MDEC movies. The debug server's own override wins. */
++extern "C" int g_psx_mod_pad_override = -1;
++extern "C" void psx_mod_set_pad_override(int buttons) {
++    g_psx_mod_pad_override = (buttons >= 0 && buttons <= 0xFFFF) ? buttons : -1;
++}
++
+ extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
+     if (enabled != 0 && enabled != 1) {
+         std::fprintf(stderr,
+@@ -6773,12 +6782,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+ 
+     /* Check debug server input override. */
+     int override = debug_server_get_input_override();
++    if (override < 0) override = g_psx_mod_pad_override;
+ #else
+     /* Production: skip debug server. Still need to advance frame counter
+      * locally so anything else that reads it continues to work. */
+     extern uint64_t s_frame_count;
+     s_frame_count++;
+-    int override = -1;
++    int override = g_psx_mod_pad_override;
+ #endif
+ 
+     {
+diff --git a/runtime/src/memory.c b/runtime/src/memory.c
+index 6f63240e..f1208476 100644
+--- a/runtime/src/memory.c
++++ b/runtime/src/memory.c
+@@ -138,6 +138,15 @@ static int mod_gpu_dma_memory_offset(uint32_t phys, uint32_t width,
+         phys, width, mod_gpu_dma_memory_used, offset);
+ }
+ 
++/* Host view of an allocated aperture range, for plugins that fill large
++ * packet arenas every frame (no per-word bus dispatch). NULL if the range is
++ * not inside the allocated part of the aperture. */
++uint8_t *psx_mod_gpu_dma_host_ptr(uint32_t address, uint32_t size) {
++    uint32_t off;
++    if (!mod_gpu_dma_memory_offset(address & 0x1FFFFFFFu, size, &off)) return NULL;
++    return mod_gpu_dma_memory + off;
++}
++
+ uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) {
+     return psx_mod_gpu_dma_resolve_address_for(
+         address, mod_gpu_dma_memory_used);
+diff --git a/runtime/src/mod_texture_banks.c b/runtime/src/mod_texture_banks.c
+index d5767db1..2b4ae283 100644
+--- a/runtime/src/mod_texture_banks.c
++++ b/runtime/src/mod_texture_banks.c
+@@ -75,13 +75,24 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
+     return 0;
+ }
+ 
++/* Suffix magic: HTP1 = exact positions only; HTP2 = also a native-depth
++ * triangle (q is absolute near/z, see gl_renderer_set_native_depth);
++ * HTP3 = HTP2 and it starts a new view (depth clear). */
++static int s_last_depth_mode;
++int mod_texture_packet_depth_mode(void) { return s_last_depth_mode; }
++
+ int mod_texture_packet_precision(uint32_t source, float q[3], float xy[6]) {
+     unsigned i, j;
+     uint32_t address = source & 0x1FFFFFFFu;
++    s_last_depth_mode = 0;
+     for (i = 0; i < arena_count; ++i) {
+         if (arenas[i].size < 80u || address < arenas[i].begin ||
+             address - arenas[i].begin > arenas[i].size - 76u) continue;
+-        if (psx_mod_read_word(source + 36u) != 0x48545031u) return 0;
++        {
++            uint32_t magic = psx_mod_read_word(source + 36u);
++            if (magic < 0x48545031u || magic > 0x48545033u) return 0;
++            s_last_depth_mode = (int)(magic - 0x48545031u);
++        }
+         for (j = 0; j < 9u; ++j) {
+             uint32_t bits = psx_mod_read_word(source + 40u + j * 4u);
+             float f;
+diff --git a/runtime/src/psx_cycles.c b/runtime/src/psx_cycles.c
+index 4bfe7460..6e98a348 100644
+--- a/runtime/src/psx_cycles.c
++++ b/runtime/src/psx_cycles.c
+@@ -195,10 +195,25 @@ uint32_t psx_idle_cycles_to_next_observable_event(void) {
+     return devices_cycles_to_next_idle_event();
+ }
+ 
++/* CPU overclock (percent, 100 = authentic). Set by a trusted mod plugin.
++ * Devices (VBlank, timers, CD, DMA, SPU) advance by 100/pct of the guest
++ * cycles the CPU spends, so the game gets pct% of the authentic CPU time per
++ * frame while every device keeps real time -- DuckStation's CPU overclock.
++ * Servicing rewinds psx_cycle_count to the devices' position, so the counter
++ * stays device time and the absolute timeline stays coherent. */
++uint32_t g_psx_cpu_overclock_pct = 100u;
++/* Debug override (debug_server "overclock"): nonzero wins over the plugin. */
++uint32_t g_psx_cpu_overclock_override = 0u;
++static uint64_t s_overclock_rem = 0;
++
+ static void psx_devices_recompute_deadline(void) {
+     uint32_t next = devices_cycles_to_next_internal_event();
+     if (next > PSX_DEADLINE_HARD_CAP) next = PSX_DEADLINE_HARD_CAP;
+-    psx_next_service_cycle = psx_cycle_count + (uint64_t)next;
++    uint64_t span = (uint64_t)next;
++    if (g_psx_cpu_overclock_pct > 100u && g_psx_cpu_overclock_pct <= 4000u &&
++        !g_ls_replay_active)
++        span = (span * g_psx_cpu_overclock_pct + 99u) / 100u;
++    psx_next_service_cycle = psx_cycle_count + span;
+ }
+ 
+ void psx_devices_service_to_now(void) {
+@@ -208,6 +223,13 @@ void psx_devices_service_to_now(void) {
+     g_psx_cycle_fast_limit = 0;
+     s_in_device_service = 1;
+     uint64_t target = psx_cycle_count;
++    if (g_psx_cpu_overclock_pct > 100u && g_psx_cpu_overclock_pct <= 4000u &&
++        !g_ls_replay_active && s_devices_synced_cycle < target) {
++        uint64_t num = (target - s_devices_synced_cycle) * 100u + s_overclock_rem;
++        s_overclock_rem = num % g_psx_cpu_overclock_pct;
++        target = s_devices_synced_cycle + num / g_psx_cpu_overclock_pct;
++        psx_cycle_count = target;
++    }
+     if (s_devices_synced_cycle < target) {
+         /* Rewind and re-play the gap in event-bounded chunks so device
+          * callbacks see the same incremental psx_cycle_count they always did
