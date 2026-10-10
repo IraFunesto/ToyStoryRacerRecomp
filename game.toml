@@ -32,7 +32,7 @@ known_crc32 = [
 
 [recompiler]
 # Plugin hooks (main EXE): HUD faces 0x80038364, rope 0x80039E30, DrawSprite 0x8004DE64.
-mod_function_entry_funcs = ["0x80038364", "0x80039E30", "0x8004DE64", "0x80043538", "0x80011568", "0x80010000", "0x8002207C", "0x8002274C", "0x80023F58", "0x80024568", "0x80012040", "0x80033A84", "0x800723A0", "0x8004E28C", "0x8004DB54"]
+mod_function_entry_funcs = ["0x80038364", "0x80039E30", "0x8004DE64", "0x80043538", "0x80011568", "0x80010000", "0x8002207C", "0x8002274C", "0x80023F58", "0x80024568", "0x80012040", "0x80033A84", "0x800723A0", "0x8004E28C", "0x8004DB54", "0x80011C18"]
 bios_config = "psxrecomp/bios/SCPH1001.toml"
 seeds = "seeds/ghidra_funcs.txt"
 out_dir = "generated"
@@ -72,7 +72,8 @@ branch_keep_sites = [
   "0x8001DF78", "0x8001E32C", "0x8001E358", "0x8001E6BC", "0x8001E6DC", "0x8001E9EC",
   "0x8001EA0C", "0x8001ED74", "0x8001EDA0", "0x8001F11C", "0x8001F148", "0x8001F498",
   "0x8001F4C4", "0x8001F7C4", "0x8001F7E4", "0x8001FAA0", "0x8001FAC0", "0x80011DE8",
-  "0x80011E14", "0x800117F8", "0x800118E8", "0x80011B98", "0x80011F60", "0x80011F8C"
+  "0x80011E14", "0x800117F8", "0x800118E8", "0x80011B98", "0x80011F60", "0x80011F8C",
+  "0x800101E4", "0x800102A8", "0x800104CC"
 ]
 screen_x_sites = [
   "0x8001146C", "0x80011478", "0x80011484", "0x80011490",
@@ -96,6 +97,193 @@ clip_edge_x_load_sites = [
   "0x80055F00", "0x80055F58"
 ]
 clip_edge_width = 511
+
+# Sky dome (0x80011C18, also the Pier's sea grid): cells whose average depth
+# OTZ is 36 or less are skipped. The dome's side cells, seen at the edges of a
+# 32:9 view, are that shallow, so the sky ended before the screen edge; keep
+# every cell in front of the camera (OTZ > 1). Cells wholly behind it still
+# have OTZ 0 and stay skipped.
+[[recompiler.patch]]
+id = "sky-cell-depth-80011ECC"
+address = "0x80011ECC"
+expected = "0x2042FFDC"
+replacement = "0x2042FFFF"
+note = "addi v0,v0,-1  (was -36)"
+
+# Object renderers (pick-up crates 0x80054FD8 and three others) compute an
+# object's view-space position as (object - camera) * view row >> 17 with
+# 32-bit products. The widescreen view matrix has a larger X row, so for an
+# object a few thousand units to the side the sum wraps around and the object
+# is drawn on the wrong side of the screen, floating in mid-air. Shift the
+# deltas right by 2 before the products (in the load-delay nops) and the
+# results by 15 instead of 17: the same value without the overflow.
+[[recompiler.patch]]
+id = "obj-pos-800536C4"
+address = "0x800536C4"
+expected = "0x00000000"
+replacement = "0x00052883"
+note = "sra a1,a1,2 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-800536D4"
+address = "0x800536D4"
+expected = "0x00000000"
+replacement = "0x00031883"
+note = "sra v1,v1,2 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-800536E4"
+address = "0x800536E4"
+expected = "0x00000000"
+replacement = "0x00042083"
+note = "sra a0,a0,2 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-8005375C"
+address = "0x8005375C"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-8005376C"
+address = "0x8005376C"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-80053780"
+address = "0x80053780"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R1_8005365C)"
+
+[[recompiler.patch]]
+id = "obj-pos-80054670"
+address = "0x80054670"
+expected = "0x00000000"
+replacement = "0x00073883"
+note = "sra a3,a3,2 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-80054680"
+address = "0x80054680"
+expected = "0x00000000"
+replacement = "0x00031883"
+note = "sra v1,v1,2 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-80054690"
+address = "0x80054690"
+expected = "0x00000000"
+replacement = "0x00063083"
+note = "sra a2,a2,2 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-800546A4"
+address = "0x800546A4"
+expected = "0x00022443"
+replacement = "0x000223C3"
+note = "sra 17 -> 15 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-80054728"
+address = "0x80054728"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-8005473C"
+address = "0x8005473C"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R2_80054640)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055180"
+address = "0x80055180"
+expected = "0x00000000"
+replacement = "0x00073883"
+note = "sra a3,a3,2 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055190"
+address = "0x80055190"
+expected = "0x00000000"
+replacement = "0x00031883"
+note = "sra v1,v1,2 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-800551A0"
+address = "0x800551A0"
+expected = "0x00000000"
+replacement = "0x00063083"
+note = "sra a2,a2,2 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-800551B4"
+address = "0x800551B4"
+expected = "0x00022443"
+replacement = "0x000223C3"
+note = "sra 17 -> 15 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-8005523C"
+address = "0x8005523C"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055250"
+address = "0x80055250"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R3_crates)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055B70"
+address = "0x80055B70"
+expected = "0x00000000"
+replacement = "0x000A5083"
+note = "sra t2,t2,2 (R4_80055B08)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055B80"
+address = "0x80055B80"
+expected = "0x00000000"
+replacement = "0x00063083"
+note = "sra a2,a2,2 (R4_80055B08)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055B90"
+address = "0x80055B90"
+expected = "0x00000000"
+replacement = "0x00084083"
+note = "sra t0,t0,2 (R4_80055B08)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055BA4"
+address = "0x80055BA4"
+expected = "0x00021C43"
+replacement = "0x00021BC3"
+note = "sra 17 -> 15 (R4_80055B08)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055C60"
+address = "0x80055C60"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R4_80055B08)"
+
+[[recompiler.patch]]
+id = "obj-pos-80055C74"
+address = "0x80055C74"
+expected = "0x00021443"
+replacement = "0x000213C3"
+note = "sra 17 -> 15 (R4_80055B08)"
 
 # Near-polygon pool: 56-byte pieces (index = n*7, address = base + index*8),
 # 2300 pieces in the stock buffers. Compiled in; the widescreen mod's

@@ -65,6 +65,12 @@ VSync on high-refresh monitors, skip the intro videos.
 - Music changes no longer hitch.
 - Pier: a corrupted sea-grid record on the European disc crashed the
   original GPU; broken packets are now dropped instead of halting the game.
+- Pick-up crates no longer float in mid-air in wide views (a 32-bit overflow
+  in the game's object position maths).
+- Scenery no longer vanishes during jumps and falls (Skate Park), and the sky
+  of the outdoor tracks reaches the edges and the top of a 32:9 view.
+- Two-player end-of-race camera cuts no longer flash shrunken prompts and
+  stale margins for a frame.
 - Damaged track data on the European disc (see below).
 
 Plus everything psxrecomp provides: high internal resolution, texture

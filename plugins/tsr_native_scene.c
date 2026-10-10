@@ -1234,14 +1234,22 @@ static void view_begin(Ctx *c) {
 static uint32_t s_empty_model;      /* mod memory: zero words */
 static uint32_t s_model_calls, s_model_tris;
 
+static uint32_t s_last_prim_cursor;
 static int frame_buffer_begin(void) {
     int buf = rd32(BUFFER_VAR) == BUFFER0 ? 0 : 1;
+    uint32_t cur = rd32(0x800A9F4Cu);   /* the game's primitive cursor */
     if (buf != s_last_buf) {
         s_last_buf = buf;
         s_frame++;
         s_arena_used[buf] = 0;
         s_nviews = 0;
+    } else if (cur < s_last_prim_cursor) {
+        /* the same buffer built again from its start (the game threw the
+         * frame away: end-of-race camera cuts) with a cleared OT: every view
+         * needs its depth clear again */
+        s_nviews = 0;
     }
+    s_last_prim_cursor = cur;
     return buf;
 }
 

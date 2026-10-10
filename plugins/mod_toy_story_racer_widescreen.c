@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -451,6 +452,14 @@ static void ui_flush(void) {
     /* a new frame in the other buffer: the recorded one is complete */
     uint32_t fb = psx_mod_read_word(0x800A9E34u);
     if (s_nel && fb != s_el_fb) ui_process_frame();
+    /* the same buffer drawn again from its start: the game threw the frame
+     * it was building away and builds it again over the same addresses (the
+     * end-of-race camera cuts). The earlier records now point at the new
+     * packets and would be processed twice (smaller, shifted prompts). */
+    else if (s_nel && start < s_el[s_nel - 1].start) {
+        s_nel = 0; s_f_num = 0; s_f_levels = 0; s_f_lvsel = 0;
+        s_rz_n = 0;
+    }
     s_el_fb = fb;
     if (e.num) s_f_num = 1;
     if (s_ui_lvsel) s_f_lvsel = 1;
@@ -639,8 +648,10 @@ static void ui_zone_pass(void) {
 /* Main loop, once per frame right after the VBlank wait: the previous frame's
  * packets are complete (a VBlank can arrive in the middle of an element). */
 #define FRAME_START_FN 0x800723A0u
+static void sky_split_flush(void);
 static void tsr_frame_start_entry(struct CPUState* cpu, uint32_t address) {
     (void)cpu; (void)address;
+    sky_split_flush();
     ui_flush();
 }
 
@@ -655,6 +666,7 @@ static void cloud_flush(void);
 /* DrawOTag: the frame's packets are complete, nothing drawn yet. */
 static void tsr_linked_list_hook(void) {
     cloud_flush();
+    sky_split_flush();
     ui_flush();
     if (s_nel) ui_process_frame();
     else {
@@ -668,6 +680,7 @@ static void tsr_linked_list_hook(void) {
 
 static void tsr_ui_text_entry(struct CPUState* cpu, uint32_t address) {
     (void)address;
+    sky_split_flush();
     ui_flush();
     uint32_t ra = cpu->gpr[31];
     s_ui_ra = ra;
@@ -786,6 +799,276 @@ static void cloud_flush(void) {
     }
 }
 
+/* ---- sky dome cap ----------------------------------------------------------
+ * 0x80011C18 (a0 block list, a1 count) draws the sky of the outdoor tracks: a
+ * dome of Gouraud cells around the camera (rotation-only matrix), 8 sectors in
+ * two rings. The upper ring stops about 46 degrees above the horizon and the
+ * dome has no top: in 4:3 that edge is never seen, but the corners of a wide
+ * view with the camera rolled (the track preview flights) look past it, onto
+ * the black background. Widescreen only, the cap is filled in: a fan of
+ * triangles from the upper edge to the zenith, coloured like the edge and
+ * linked into the sky's OT slot before the game adds its cells (the cap does
+ * not overlap them, so the order does not matter).
+ * Block (44 bytes): +0 vertex base, +4 cells (12 bytes: four int16 vertex
+ * offsets, flag pointer), +12 four corners (int16 x y z), +38 cell count.
+ * Vertex (12 bytes): int16 x y z, pad, colour word. */
+#define SKY_DRAW_FN    0x80011C18u
+#define SKY_OT_OFFSET  4152u   /* the sky's OT entry: OT base + 1038 * 4 */
+#define CAP_MAX_RING   256
+
+typedef struct { int32_t x, y, z; uint32_t rgb; float az; } CapVert;
+
+/* The current GTE matrix (the game's own setup for the dome): view space,
+ * then the RTPS projection. */
+typedef struct { float x, y, z, r, g, b; } CapPt;
+static void cap_view(const struct CPUState *cpu, int32_t vx, int32_t vy, int32_t vz,
+                     uint32_t rgb, CapPt *o) {
+    const uint32_t *c = cpu->gte_ctrl;
+    float r11 = (int16_t)(c[0] & 0xFFFFu), r12 = (int16_t)(c[0] >> 16);
+    float r13 = (int16_t)(c[1] & 0xFFFFu), r21 = (int16_t)(c[1] >> 16);
+    float r22 = (int16_t)(c[2] & 0xFFFFu), r23 = (int16_t)(c[2] >> 16);
+    float r31 = (int16_t)(c[3] & 0xFFFFu), r32 = (int16_t)(c[3] >> 16);
+    float r33 = (int16_t)(c[4] & 0xFFFFu);
+    o->x = (int32_t)c[5] + (r11 * vx + r12 * vy + r13 * vz) / 4096.0f;
+    o->y = (int32_t)c[6] + (r21 * vx + r22 * vy + r23 * vz) / 4096.0f;
+    o->z = (int32_t)c[7] + (r31 * vx + r32 * vy + r33 * vz) / 4096.0f;
+    o->r = (float)(rgb & 0xFFu); o->g = (float)((rgb >> 8) & 0xFFu); o->b = (float)((rgb >> 16) & 0xFFu);
+}
+static void cap_screen(const struct CPUState *cpu, const CapPt *p, int32_t *sx, int32_t *sy) {
+    const uint32_t *c = cpu->gte_ctrl;
+    float h = (float)(c[26] & 0xFFFFu);
+    float div = h / p->z;
+    float x = (int32_t)c[24] / 65536.0f + p->x * div, y = (int32_t)c[25] / 65536.0f + p->y * div;
+    if (x < -1024.0f) x = -1024.0f; if (x > 1023.0f) x = 1023.0f;
+    if (y < -1024.0f) y = -1024.0f; if (y > 1023.0f) y = 1023.0f;
+    *sx = (int32_t)floorf(x); *sy = (int32_t)floorf(y);
+}
+
+/* One cap triangle in view space: clipped at the near plane (z = h/2, where
+ * the GTE's quotient limit is reached), split while it is larger on screen
+ * than a GPU polygon may be (1023 x 511), then linked into the OT. */
+typedef struct { uint32_t cur, lim, ot; float near; } CapOut;
+static void cap_emit(const struct CPUState *cpu, CapOut *co, const CapPt *a, const CapPt *b,
+                     const CapPt *c, int depth) {
+    const CapPt *in[3] = { a, b, c };
+    CapPt out[4];
+    int m = 0;
+    for (int k = 0; k < 3; k++) {
+        const CapPt *p = in[k], *q = in[(k + 1) % 3];
+        int pin = p->z >= co->near, qin = q->z >= co->near;
+        if (pin) out[m++] = *p;
+        if (pin != qin) {
+            float t = (co->near - p->z) / (q->z - p->z);
+            CapPt *o = &out[m++];
+            o->x = p->x + (q->x - p->x) * t; o->y = p->y + (q->y - p->y) * t; o->z = co->near;
+            o->r = p->r + (q->r - p->r) * t; o->g = p->g + (q->g - p->g) * t; o->b = p->b + (q->b - p->b) * t;
+        }
+    }
+    for (int t = 0; t + 2 < m; t++) {   /* fan: 3 or 4 vertices */
+        const CapPt *v[3] = { &out[0], &out[t + 1], &out[t + 2] };
+        int32_t sx[3], sy[3];
+        for (int k = 0; k < 3; k++) cap_screen(cpu, v[k], &sx[k], &sy[k]);
+        int32_t x0 = sx[0], x1 = sx[0], y0 = sy[0], y1 = sy[0];
+        for (int k = 1; k < 3; k++) {
+            if (sx[k] < x0) x0 = sx[k]; if (sx[k] > x1) x1 = sx[k];
+            if (sy[k] < y0) y0 = sy[k]; if (sy[k] > y1) y1 = sy[k];
+        }
+        if ((x1 - x0 > 1000 || y1 - y0 > 500) && depth < 5) {
+            CapPt mid[3];
+            for (int k = 0; k < 3; k++) {
+                const CapPt *p = v[k], *q = v[(k + 1) % 3];
+                mid[k].x = (p->x + q->x) * 0.5f; mid[k].y = (p->y + q->y) * 0.5f; mid[k].z = (p->z + q->z) * 0.5f;
+                mid[k].r = (p->r + q->r) * 0.5f; mid[k].g = (p->g + q->g) * 0.5f; mid[k].b = (p->b + q->b) * 0.5f;
+            }
+            cap_emit(cpu, co, v[0], &mid[0], &mid[2], depth + 1);
+            cap_emit(cpu, co, &mid[0], v[1], &mid[1], depth + 1);
+            cap_emit(cpu, co, &mid[2], &mid[1], v[2], depth + 1);
+            cap_emit(cpu, co, &mid[0], &mid[1], &mid[2], depth + 1);
+            continue;
+        }
+        if (!ram_address(co->cur) || co->cur + 28u + 36u > co->lim) return;
+        uint32_t head = psx_mod_read_word(co->ot);
+        psx_mod_write_word(co->cur, (6u << 24) | (head & 0x00FFFFFFu));
+        for (int k = 0; k < 3; k++) {
+            uint32_t rgb = (uint32_t)v[k]->r | ((uint32_t)v[k]->g << 8) | ((uint32_t)v[k]->b << 16);
+            psx_mod_write_word(co->cur + 4u + (uint32_t)k * 8u, (k == 0 ? 0x30000000u : 0u) | rgb);
+            psx_mod_write_word(co->cur + 8u + (uint32_t)k * 8u, ((uint32_t)(uint16_t)sy[k] << 16) | (uint16_t)sx[k]);
+        }
+        psx_mod_write_word(co->ot, (head & 0xFF000000u) | (co->cur & 0x00FFFFFFu));
+        co->cur += 28u;
+    }
+}
+
+static int cap_cmp(const void *a, const void *b) {
+    float d = ((const CapVert *)a)->az - ((const CapVert *)b)->az;
+    return d < 0.0f ? -1 : d > 0.0f ? 1 : 0;
+}
+
+static void sky_cap(struct CPUState *cpu) {
+    uint32_t list = cpu->gpr[4];
+    int count = (int32_t)cpu->gpr[5];
+    if (!ram_address(list) || count <= 0 || count > 64) return;
+    static CapVert ring[CAP_MAX_RING];
+    int n = 0;
+    int32_t top = 0;
+    /* the upper edge: the highest corners of the dome */
+    for (int b = 0; b < count; b++)
+        for (int k = 0; k < 4; k++) {
+            int32_t y = (int16_t)psx_mod_read_half(list + (uint32_t)b * 44u + 14u + (uint32_t)k * 6u);
+            if (y < top) top = y;
+        }
+    if (top >= 0) return;
+    for (int b = 0; b < count && n < CAP_MAX_RING; b++) {
+        uint32_t blk = list + (uint32_t)b * 44u;
+        int top_corners = 0;
+        for (int k = 0; k < 4; k++)
+            top_corners += (int16_t)psx_mod_read_half(blk + 14u + (uint32_t)k * 6u) == top;
+        if (top_corners < 2) continue;
+        uint32_t base = psx_mod_read_word(blk), cells = psx_mod_read_word(blk + 4u);
+        int ncell = (int16_t)psx_mod_read_half(blk + 38u);
+        if (!ram_address(base) || !ram_address(cells) || ncell <= 0 || ncell > 256) continue;
+        for (int ci = 0; ci < ncell && n < CAP_MAX_RING; ci++)
+            for (int k = 0; k < 4 && n < CAP_MAX_RING; k++) {
+                uint32_t v = base + (uint32_t)(int16_t)psx_mod_read_half(cells + (uint32_t)ci * 12u + (uint32_t)k * 2u);
+                if ((int16_t)psx_mod_read_half(v + 2u) != top) continue;
+                /* neighbouring blocks repeat their shared edge vertices */
+                int32_t x = (int16_t)psx_mod_read_half(v), z = (int16_t)psx_mod_read_half(v + 4u);
+                int dup = 0;
+                for (int s = 0; s < n && !dup; s++) dup = ring[s].x == x && ring[s].z == z;
+                if (dup) continue;
+                CapVert *cv = &ring[n++];
+                cv->x = x;
+                cv->y = top;
+                cv->z = z;
+                cv->rgb = psx_mod_read_word(v + 8u) & 0x00FFFFFFu;
+                cv->az = atan2f((float)cv->x, (float)cv->z);
+            }
+    }
+    if (n < 3) return;
+    qsort(ring, (size_t)n, sizeof ring[0], cap_cmp);
+    /* the zenith: above the dome's centre, coloured like the edge on average */
+    uint32_t sr = 0, sg = 0, sb = 0;
+    float rad = 0.0f;
+    for (int i = 0; i < n; i++) {
+        sr += ring[i].rgb & 0xFFu; sg += (ring[i].rgb >> 8) & 0xFFu; sb += (ring[i].rgb >> 16) & 0xFFu;
+        rad += sqrtf((float)ring[i].x * ring[i].x + (float)ring[i].z * ring[i].z);
+    }
+    uint32_t zrgb = (sr / (uint32_t)n) | ((sg / (uint32_t)n) << 8) | ((sb / (uint32_t)n) << 16);
+    int32_t zy = top - (int32_t)(rad / (float)n);
+    uint32_t ot = psx_mod_read_word(0x800A9B10u) + SKY_OT_OFFSET;
+    if (!ram_address(ot)) return;
+    CapOut co;
+    co.cur = psx_mod_read_word(PRIM_CURSOR);
+    co.lim = psx_mod_read_word(PRIM_LIMIT);
+    co.ot = ot;
+    co.near = (float)(cpu->gte_ctrl[26] & 0xFFFFu) * 0.5f;
+    if (co.near < 16.0f) co.near = 16.0f;
+    CapPt zen;
+    cap_view(cpu, 0, zy, 0, zrgb, &zen);
+    for (int i = 0; i < n; i++) {
+        const CapVert *a = &ring[i], *b = &ring[(i + 1) % n];
+        CapPt pa, pb;
+        cap_view(cpu, a->x, a->y, a->z, a->rgb, &pa);
+        cap_view(cpu, b->x, b->y, b->z, b->rgb, &pb);
+        cap_emit(cpu, &co, &pa, &pb, &zen, 0);
+    }
+    psx_mod_write_word(PRIM_CURSOR, co.cur);
+}
+
+/* The dome's own cells: in a wide view the cells near the screen edges
+ * project far wider than in 4:3, and the GPU drops any triangle more than
+ * 1023 pixels wide or 511 tall (as the PlayStation does), which left black
+ * wedges in the sky. After the game has drawn the dome, each such cell
+ * (POLY_G4 in the sky's OT entry) is cut into a grid of smaller quads with
+ * the same corners and colours, linked in its place. */
+static uint32_t s_sky_split_start, s_sky_split_fb;
+static int s_sky_split_pending;
+
+static int g4_tri_oversize(const int32_t *x, const int32_t *y, int a, int b, int c) {
+    int32_t x0 = x[a], x1 = x[a], y0 = y[a], y1 = y[a];
+    const int v[2] = { b, c };
+    for (int k = 0; k < 2; k++) {
+        if (x[v[k]] < x0) x0 = x[v[k]]; if (x[v[k]] > x1) x1 = x[v[k]];
+        if (y[v[k]] < y0) y0 = y[v[k]]; if (y[v[k]] > y1) y1 = y[v[k]];
+    }
+    return x1 - x0 > 1023 || y1 - y0 > 511;
+}
+
+static void sky_split_flush(void) {
+    if (!s_sky_split_pending) return;
+    s_sky_split_pending = 0;
+    /* only while the same frame is being built */
+    if (psx_mod_read_word(0x800A9E34u) != s_sky_split_fb) return;
+    uint32_t start = s_sky_split_start, end = psx_mod_read_word(PRIM_CURSOR);
+    uint32_t lim = psx_mod_read_word(PRIM_LIMIT), cur = end;
+    if (!ram_address(start) || end < start) return;
+    /* the dome's cells: consecutive 36-byte POLY_G4 packets from where the
+     * call started, each linked to the one before it */
+    for (uint32_t a = start; a + 36u <= end && a < start + 1024u * 36u; a += 36u) {
+        uint32_t tag = psx_mod_read_word(a);
+        uint32_t next = tag & 0x00FFFFFFu;
+        uint32_t cmd = psx_mod_read_word(a + 4u) >> 24;
+        if ((tag >> 24) != 8u || (cmd & 0xFDu) != 0x38u) break;
+        if (a != start && next != ((a - 36u) & 0x00FFFFFFu)) break;
+        {
+            int32_t x[4], y[4];
+            uint32_t col[4];
+            for (int k = 0; k < 4; k++) {
+                col[k] = psx_mod_read_word(a + 4u + (uint32_t)k * 8u) & 0x00FFFFFFu;
+                uint32_t xy = psx_mod_read_word(a + 8u + (uint32_t)k * 8u);
+                x[k] = (int16_t)(xy & 0xFFFFu); y[k] = (int16_t)(xy >> 16);
+            }
+            if (g4_tri_oversize(x, y, 0, 1, 2) || g4_tri_oversize(x, y, 2, 1, 3)) {
+                int32_t x0 = x[0], x1 = x[0], y0 = y[0], y1 = y[0];
+                for (int k = 1; k < 4; k++) {
+                    if (x[k] < x0) x0 = x[k]; if (x[k] > x1) x1 = x[k];
+                    if (y[k] < y0) y0 = y[k]; if (y[k] > y1) y1 = y[k];
+                }
+                int nx = (x1 - x0) / 600 + 1, ny = (y1 - y0) / 300 + 1;
+                if (nx > 8) nx = 8; if (ny > 8) ny = 8;
+                if (cur + (uint32_t)(nx * ny) * 36u + 64u > lim) break;
+                /* bilinear over the quad: v0 v1 top, v2 v3 bottom */
+                uint32_t link = next;
+                for (int j = 0; j < ny; j++)
+                    for (int i = 0; i < nx; i++) {
+                        uint32_t q = cur;
+                        cur += 36u;
+                        for (int k = 0; k < 4; k++) {
+                            float u = (float)(i + (k & 1)) / nx, v = (float)(j + (k >> 1)) / ny;
+                            float w0 = (1 - u) * (1 - v), w1 = u * (1 - v), w2 = (1 - u) * v, w3 = u * v;
+                            int32_t qx = (int32_t)floorf(w0 * x[0] + w1 * x[1] + w2 * x[2] + w3 * x[3] + 0.5f);
+                            int32_t qy = (int32_t)floorf(w0 * y[0] + w1 * y[1] + w2 * y[2] + w3 * y[3] + 0.5f);
+                            uint32_t rgb = 0;
+                            for (int s = 0; s < 24; s += 8) {
+                                float c = w0 * ((col[0] >> s) & 0xFFu) + w1 * ((col[1] >> s) & 0xFFu) +
+                                          w2 * ((col[2] >> s) & 0xFFu) + w3 * ((col[3] >> s) & 0xFFu);
+                                rgb |= ((uint32_t)(c + 0.5f) & 0xFFu) << s;
+                            }
+                            psx_mod_write_word(q + 4u + (uint32_t)k * 8u, (k == 0 ? (cmd << 24) : 0u) | rgb);
+                            psx_mod_write_word(q + 8u + (uint32_t)k * 8u,
+                                               ((uint32_t)(uint16_t)qy << 16) | (uint16_t)qx);
+                        }
+                        psx_mod_write_word(q, (8u << 24) | (link & 0x00FFFFFFu));
+                        link = q & 0x00FFFFFFu;
+                    }
+                /* the cell itself becomes an empty link to the new quads */
+                psx_mod_write_word(a, link & 0x00FFFFFFu);
+            }
+        }
+    }
+    psx_mod_write_word(PRIM_CURSOR, cur);
+}
+
+static void tsr_sky_draw_entry(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    sky_split_flush();   /* the other view's dome (two players) */
+    if (psx_mod_widescreen_x_margin() <= 0) return;   /* 4:3: as the game draws it */
+    sky_cap(cpu);
+    s_sky_split_start = psx_mod_read_word(PRIM_CURSOR);
+    s_sky_split_fb = psx_mod_read_word(0x800A9E34u);
+    s_sky_split_pending = 1;
+}
+
 /* 0x8004DB54: called by the sky routine right after its cloud loop, still in
  * the same frame: the last cloud's copies are made there. */
 #define SKY_END_FN 0x8004DB54u
@@ -798,6 +1081,7 @@ static void tsr_sky_end_entry(struct CPUState* cpu, uint32_t address) {
 static void tsr_ui_icon_entry(struct CPUState* cpu, uint32_t address) {
     (void)address;
     uint32_t ra = cpu->gpr[31];
+    sky_split_flush();
     cloud_flush();
     if (ra == CLOUD_RA1 || ra == CLOUD_RA2) {
         s_cloud_start = psx_mod_read_word(PRIM_CURSOR);
@@ -1071,4 +1355,6 @@ PSX_MOD_CONSTRUCTOR(psx_register_toy_story_racer_widescreen_plugin) {
         "toystoryracer.widescreen", UI_ICON_FN, tsr_ui_icon_entry);
     (void)psx_mod_register_function_entry_plugin(
         "toystoryracer.widescreen", SKY_END_FN, tsr_sky_end_entry);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", SKY_DRAW_FN, tsr_sky_draw_entry);
 }
