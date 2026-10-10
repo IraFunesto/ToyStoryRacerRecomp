@@ -7,7 +7,7 @@
 <!-- /retcomm-readme-metrics -->
 
 <p align="center">
-  <img src="docs/screenshot-ultrawide.png" alt="Toy Story Racer running in 32:9" width="900">
+  <img src="docs/screenshot-ultrawide.png" alt="Toy Story Racer, two players in 32:9" width="900">
 </p>
 
 Static recompilation of **Disney•Pixar Toy Story Racer** (PlayStation, PAL
@@ -67,8 +67,12 @@ VSync on high-refresh monitors, skip the intro videos.
   original GPU; broken packets are now dropped instead of halting the game.
 - Pick-up crates no longer float in mid-air in wide views (a 32-bit overflow
   in the game's object position maths).
-- Scenery no longer vanishes during jumps and falls (Skate Park), and the sky
-  of the outdoor tracks reaches the edges and the top of a 32:9 view.
+- Scenery no longer vanishes during jumps and falls (Skate Park) or at long
+  range (fences and roofs in the Neighbourhood), and the sky of the outdoor
+  tracks reaches the edges and the top of a 32:9 view.
+- The star-shaped scene transition covers the whole 32:9 view.
+- Lamp halos are round (no faint square around them) and no longer shine
+  through walls.
 - Two-player end-of-race camera cuts no longer flash shrunken prompts and
   stale margins for a frame.
 - Damaged track data on the European disc (see below).

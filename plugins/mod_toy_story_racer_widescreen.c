@@ -662,9 +662,58 @@ static int tsr_world_scene(void) {
     return psx_mod_read_byte(INTRO_STAGE) >= 5u;
 }
 
+/* ---- star wipe -------------------------------------------------------------
+ * Scene changes close and open a star-shaped hole over the cloud sky
+ * (0x8004B448, after its cloud loop): ten flat quads between the star's
+ * outline and a ring of radius 546 x 341 around the screen centre (256, 128),
+ * the last packets of the frame. Quad vertices: star i, ring i, star i + 1,
+ * ring i + 1. The ring is sized for 4:3 (it still covers 21:9); in wider
+ * views the sides stayed uncovered. The star and its ring are enlarged about
+ * the centre just enough for the ring to cover the wide view (the GPU's
+ * 1023 x 511 polygon limit allows up to about 1.45). */
+#define STAR_QUADS 10
+static void star_wipe_widen(void) {
+    int32_t m = psx_mod_widescreen_x_margin();
+    if (m <= 0) return;
+    /* the ring must reach the view's corners, (256 + m, 128) from the
+     * centre; a decagon's apothem is cos 18 = 0.951 of its radius */
+    float ex = (256.0f + (float)m) / 546.0f, ey = 128.0f / 341.0f;
+    float g = 1.03f * sqrtf(ex * ex + ey * ey) / 0.951f;
+    if (g <= 1.02f) return;
+    if (g > 1.45f) g = 1.45f;
+    uint32_t cur = psx_mod_read_word(PRIM_CURSOR);
+    uint32_t first = cur - STAR_QUADS * 24u;
+    if (!ram_address(first) || !ram_address(cur)) return;
+    for (int i = 0; i < STAR_QUADS; i++) {
+        uint32_t p = first + (uint32_t)i * 24u;
+        if ((psx_mod_read_word(p) >> 24) != 5u || (psx_mod_read_word(p + 4u) >> 24) != 0x28u) return;
+    }
+    /* already enlarged (DrawOTag can run more than once per frame): the
+     * first quad's ring vertex is off the game's ellipse */
+    {
+        float rx = (float)((int16_t)psx_mod_read_half(first + 12u) - 256) / 546.0f;
+        float ry = (float)((int16_t)psx_mod_read_half(first + 14u) - 128) / 341.0f;
+        if (sqrtf(rx * rx + ry * ry) > (1.0f + g) * 0.5f) return;
+    }
+    for (int i = 0; i < STAR_QUADS; i++) {
+        uint32_t p = first + (uint32_t)i * 24u;
+        for (int v = 0; v < 4; v++) {
+            uint32_t o = p + 8u + (uint32_t)v * 4u;
+            float x = 256.0f + (float)((int16_t)psx_mod_read_half(o) - 256) * g;
+            float y = 128.0f + (float)((int16_t)psx_mod_read_half(o + 2u) - 128) * g;
+            /* the GPU's coordinate range; only reached outside the view */
+            if (x < -1024.0f) x = -1024.0f; if (x > 1023.0f) x = 1023.0f;
+            if (y < -1024.0f) y = -1024.0f; if (y > 1023.0f) y = 1023.0f;
+            psx_mod_write_half(o, (uint16_t)(int16_t)floorf(x + 0.5f));
+            psx_mod_write_half(o + 2u, (uint16_t)(int16_t)floorf(y + 0.5f));
+        }
+    }
+}
+
 static void cloud_flush(void);
 /* DrawOTag: the frame's packets are complete, nothing drawn yet. */
 static void tsr_linked_list_hook(void) {
+    star_wipe_widen();   /* before anything is appended after the star */
     cloud_flush();
     sky_split_flush();
     ui_flush();

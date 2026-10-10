@@ -147,9 +147,10 @@ static int s_flat_bank_ok;
  * glow texture, whose rim is dark grey instead of black: added over the
  * smooth native walls at high resolution it showed the quad's square. */
 #define GLOW_BANK        0x7E03u
+#define GLOW_BANK2       0x7E04u   /* the 64x64 halo (cellar lamp) */
 #define GLOW_SIZE        128u
 static int s_glow_bank_ok;
-static int s_force_glow;      /* emit_face: draw the next face from GLOW_BANK */
+static int s_force_glow;      /* emit_face: draw the next face from this glow bank (0 = no) */
 /* Halos are drawn without the native depth test (HTP1), in the game's own
  * OT slot: like the game's, they brighten whatever the painter order puts
  * under them (the boxes around a lamp catch its glare). */
@@ -937,7 +938,7 @@ static void emit_face(Ctx *c, NVert *poly, int n, uint8_t flags, uint8_t texmap,
     uint32_t cmd = textured ? (semi ? 0x36u : 0x34u) : (semi ? 0x32u : 0x30u);
     c->bank = 0;
     if (s_force_glow) {
-        c->bank = GLOW_BANK;
+        c->bank = (uint32_t)s_force_glow;
         tpage = (uint16_t)(0x100u | abr);   /* 15-bit direct texels */
         clut = 0;
     }
@@ -975,6 +976,101 @@ static void false_colour(NVert *v, int n) {
  * (diag(6553/4096, 1, 0), the widescreen X scale), type 3 turned to face the
  * camera about Y (camera * Ry(-yaw), yaw at 0x800A9F62) -- as the game's
  * handlers 0x80043C10 / 0x800439F0 set up for 0x8004938C / 0x80049EBC. */
+/* ---- lamp halo occlusion ----------------------------------------------------
+ * The halo is drawn without the depth test (the things around a lamp catch
+ * its glare, as in the game), so it also showed through the walls between
+ * the camera and the lamp. Like a lens flare, its brightness follows how much
+ * of the lamp itself is in sight: segments from the camera to a few points
+ * around the lamp's centre are tested against the level's scenery, leaving
+ * out what is right at the lamp (its own fixture and shade). View space:
+ * the camera is the origin. */
+#define HALO_SKIP    200.0f   /* scenery this close to the lamp does not hide it */
+#define HALO_SPREAD   48.0f   /* sample points around the centre */
+
+static int seg_hits_item(const Ctx *c, const NItem *it, const float *p, float t1) {
+    const NObj *o = &s_objs[it->obj];
+    /* the section's bounding sphere against the segment */
+    float dx = it->cx - c->cam[0], dy = it->cy - c->cam[1], dz = it->cz - c->cam[2];
+    float sc[3];
+    for (int i = 0; i < 3; i++) sc[i] = c->m[i * 3] * dx + c->m[i * 3 + 1] * dy + c->m[i * 3 + 2] * dz;
+    float r = it->radius * 1.7f + 64.0f;
+    float pp = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+    float tt = (sc[0] * p[0] + sc[1] * p[1] + sc[2] * p[2]) / pp;
+    if (tt < 0.0f) tt = 0.0f;
+    if (tt > t1) tt = t1;
+    float ex = sc[0] - p[0] * tt, ey = sc[1] - p[1] * tt, ez = sc[2] - p[2] * tt;
+    if (ex * ex + ey * ey + ez * ez > r * r) return 0;
+    /* object -> camera transform, as emit_item */
+    float pos[3], mrot[9], A[9], t[3];
+    pos[0] = (float)(int32_t)rd32(it->item_addr);
+    pos[1] = (float)(int32_t)rd32(it->item_addr + 4u);
+    pos[2] = (float)(int32_t)rd32(it->item_addr + 8u);
+    if (rd32(it->item_addr + 12u) != 0u || rd16(it->item_addr + 16u) != 0u) {
+        for (int k = 0; k < 9; k++) mrot[k] = (int16_t)rd16(it->rec_addr + (uint32_t)k * 2u) / 4096.0f;
+    } else {
+        memcpy(mrot, it->m, sizeof mrot);
+    }
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++)
+            A[i * 3 + j] = c->m[i * 3 + 0] * mrot[0 * 3 + j] + c->m[i * 3 + 1] * mrot[1 * 3 + j] +
+                           c->m[i * 3 + 2] * mrot[2 * 3 + j];
+        t[i] = c->m[i * 3 + 0] * (pos[0] - c->cam[0]) + c->m[i * 3 + 1] * (pos[1] - c->cam[1]) +
+               c->m[i * 3 + 2] * (pos[2] - c->cam[2]);
+    }
+    static float vx[MAX_VERTS], vy[MAX_VERTS], vz[MAX_VERTS];
+    for (int k = 0; k < o->nverts; k++) {
+        float x = o->v[k][0], y = o->v[k][1], z = o->v[k][2];
+        vx[k] = A[0] * x + A[1] * y + A[2] * z + t[0];
+        vy[k] = A[3] * x + A[4] * y + A[5] * z + t[1];
+        vz[k] = A[6] * x + A[7] * y + A[8] * z + t[2];
+    }
+    for (int fi = 0; fi < o->nfaces; fi++) {
+        const NFace *f = &s_faces[o->first_face + fi];
+        if ((((uint32_t)f->flags & 0x60u) + 0x20u) & 0x60u) continue;   /* blended (glass): no */
+        for (int k = 0; k + 2 < f->n; k++) {
+            int i0 = f->idx[0], i1 = f->idx[k + 1], i2 = f->idx[k + 2];
+            float ax = vx[i0], ay = vy[i0], az = vz[i0];
+            float e1x = vx[i1] - ax, e1y = vy[i1] - ay, e1z = vz[i1] - az;
+            float e2x = vx[i2] - ax, e2y = vy[i2] - ay, e2z = vz[i2] - az;
+            if (!(f->flags & 2u)) {
+                /* single-sided, seen from behind: not drawn, hides nothing */
+                float nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+                if (nx * ax + ny * ay + nz * az >= 0.0f) continue;
+            }
+            /* segment (origin .. p) against the triangle */
+            float hx = p[1] * e2z - p[2] * e2y, hy = p[2] * e2x - p[0] * e2z, hz = p[0] * e2y - p[1] * e2x;
+            float det = e1x * hx + e1y * hy + e1z * hz;
+            if (det > -1e-4f && det < 1e-4f) continue;
+            float inv = 1.0f / det;
+            float u = -(ax * hx + ay * hy + az * hz) * inv;
+            if (u < 0.0f || u > 1.0f) continue;
+            float qx = -(ay * e1z - az * e1y), qy = -(az * e1x - ax * e1z), qz = -(ax * e1y - ay * e1x);
+            float v = (p[0] * qx + p[1] * qy + p[2] * qz) * inv;
+            if (v < 0.0f || u + v > 1.0f) continue;
+            float th = (e2x * qx + e2y * qy + e2z * qz) * inv;
+            if (th > 0.02f && th < t1) return 1;
+        }
+    }
+    return 0;
+}
+
+/* 0 = the lamp is hidden, 1 = in full sight */
+static float halo_visibility(const Ctx *c, const float *ce) {
+    static const float off[5][2] = { { 0, 0 }, { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+    int seen = 0;
+    for (int s = 0; s < 5; s++) {
+        float p[3] = { ce[0] + off[s][0] * HALO_SPREAD, ce[1] + off[s][1] * HALO_SPREAD, ce[2] };
+        float len = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        float t1 = len > 1.0f ? 1.0f - HALO_SKIP / len : 0.0f;
+        int hit = 0;
+        if (t1 > 0.05f)
+            for (int k = 0; k < s_nitems && !hit; k++)
+                if (!s_items[k].kind && s_items[k].obj >= 0) hit = seg_hits_item(c, &s_items[k], p, t1);
+        seen += !hit;
+    }
+    return (float)seen / 5.0f;
+}
+
 static void emit_sprites(Ctx *c, const NItem *it) {
     float pos[3];
     pos[0] = (float)(int32_t)rd32(it->item_addr);
@@ -1022,16 +1118,25 @@ static void emit_sprites(Ctx *c, const NItem *it) {
                 if (s_false_colour) false_colour(&poly[j], it->sec);
             }
             uint8_t fl = (uint8_t)((sq->tm & 0x60u) | 0x02u);
-            /* The lamps' additive halo: texmap 1, texels (0..31, 192..223). */
-            int glow = s_glow_bank_ok && !s_false_colour && (sq->tm & 0x7Fu) == 0x21u;
+            /* The lamps' additive halos: texmap 1, texels (0..31, 192..223),
+             * and texmap 2, texels (0..63, 128..191). */
+            int glow = 0, gu1 = 0, gv0 = 0, gv1 = 0;
+            if (s_glow_bank_ok && !s_false_colour) {
+                if ((sq->tm & 0x7Fu) == 0x21u) { glow = (int)GLOW_BANK; gu1 = 31; gv0 = 192; gv1 = 223; }
+                else if ((sq->tm & 0x7Fu) == 0x22u) { glow = (int)GLOW_BANK2; gu1 = 63; gv0 = 128; gv1 = 191; }
+            }
             for (int j = 0; j < 4 && glow; j++)
-                if ((sq->uv[j][0] != 0 && sq->uv[j][0] != 31) || (sq->uv[j][1] != 192 && sq->uv[j][1] != 223)) glow = 0;
+                if ((sq->uv[j][0] != 0 && sq->uv[j][0] != gu1) || (sq->uv[j][1] != gv0 && sq->uv[j][1] != gv1)) glow = 0;
             if (glow) {
+                /* dimmed by what stands between the camera and the lamp */
+                float seen = halo_visibility(c, ce);
+                if (seen <= 0.0f) continue;
                 for (int j = 0; j < 4; j++) {
                     poly[j].u = sq->uv[j][0] ? (float)(GLOW_SIZE - 1u) : 0.0f;
-                    poly[j].v = sq->uv[j][1] == 223 ? (float)(GLOW_SIZE - 1u) : 0.0f;
+                    poly[j].v = sq->uv[j][1] == gv1 ? (float)(GLOW_SIZE - 1u) : 0.0f;
+                    poly[j].r *= seen; poly[j].g *= seen; poly[j].b *= seen;
                 }
-                s_force_glow = 1;
+                s_force_glow = glow;
                 emit_face(c, poly, 4, fl, (uint8_t)(sq->tm & 0x1Fu), sq->uv, zt);
                 s_force_glow = 0;
                 continue;
@@ -1124,18 +1229,29 @@ static void ensure_banks(void) {
          * (blended). */
         static const float rr[] = { 0.0f, 0.5f, 1.5f, 2.5f, 3.5f, 4.5f, 5.5f, 6.5f, 7.5f, 8.5f, 9.5f, 10.5f, 11.5f, 12.5f, 13.5f, 15.5f };
         static const float lv[] = { 23, 23, 22, 21, 19, 17, 15.9f, 14.4f, 12.7f, 11.4f, 9.8f, 8.2f, 6.8f, 5.0f, 3.4f, 0 };
-        static uint16_t gp[GLOW_SIZE * GLOW_SIZE];
-        for (uint32_t y = 0; y < GLOW_SIZE; y++)
-            for (uint32_t x = 0; x < GLOW_SIZE; x++) {
-                float dx = ((float)x + 0.5f) / GLOW_SIZE * 32.0f - 16.0f;
-                float dy = ((float)y + 0.5f) / GLOW_SIZE * 32.0f - 16.0f;
-                float r = sqrtf(dx * dx + dy * dy), l = 0.0f;
-                for (int k = 0; k + 1 < (int)(sizeof rr / sizeof rr[0]); k++)
-                    if (r >= rr[k] && r < rr[k + 1]) { l = lv[k] + (lv[k + 1] - lv[k]) * (r - rr[k]) / (rr[k + 1] - rr[k]); break; }
-                int v = (int)(l + 0.5f);
-                gp[y * GLOW_SIZE + x] = v > 0 ? (uint16_t)(0x8000u | (uint32_t)v | ((uint32_t)v << 5) | ((uint32_t)v << 10)) : 0u;
-            }
-        s_glow_bank_ok = psx_mod_define_texture_bank(GLOW_BANK, GLOW_SIZE, GLOW_SIZE, gp);
+        /* The second halo (64 texels, texmap 2 at 0..63, 128..191): an even
+         * ramp from 30 at the centre to 1 at radius 31, then 1 out to the
+         * corners (the same faint square). */
+        static const float rr2[] = { 0.0f, 0.5f, 4.5f, 8.5f, 12.5f, 16.5f, 20.5f, 24.5f, 28.5f, 30.5f, 32.0f };
+        static const float lv2[] = { 30.2f, 30.2f, 26.7f, 22.9f, 19.5f, 15.6f, 11.7f, 7.6f, 3.5f, 1.4f, 0 };
+        static uint16_t gp[2][GLOW_SIZE * GLOW_SIZE];
+        for (int bk = 0; bk < 2; bk++) {
+            const float *R = bk ? rr2 : rr, *L = bk ? lv2 : lv;
+            int nr = bk ? (int)(sizeof rr2 / sizeof rr2[0]) : (int)(sizeof rr / sizeof rr[0]);
+            float texels = bk ? 64.0f : 32.0f;
+            for (uint32_t y = 0; y < GLOW_SIZE; y++)
+                for (uint32_t x = 0; x < GLOW_SIZE; x++) {
+                    float dx = ((float)x + 0.5f) / GLOW_SIZE * texels - texels * 0.5f;
+                    float dy = ((float)y + 0.5f) / GLOW_SIZE * texels - texels * 0.5f;
+                    float r = sqrtf(dx * dx + dy * dy), l = 0.0f;
+                    for (int k = 0; k + 1 < nr; k++)
+                        if (r >= R[k] && r < R[k + 1]) { l = L[k] + (L[k + 1] - L[k]) * (r - R[k]) / (R[k + 1] - R[k]); break; }
+                    int v = (int)(l + 0.5f);
+                    gp[bk][y * GLOW_SIZE + x] = v > 0 ? (uint16_t)(0x8000u | (uint32_t)v | ((uint32_t)v << 5) | ((uint32_t)v << 10)) : 0u;
+                }
+        }
+        s_glow_bank_ok = psx_mod_define_texture_bank(GLOW_BANK, GLOW_SIZE, GLOW_SIZE, gp[0]) &&
+                         psx_mod_define_texture_bank(GLOW_BANK2, GLOW_SIZE, GLOW_SIZE, gp[1]);
         fprintf(stdout, "tsr native scene: texture banks flat %d glow %d\n", s_flat_bank_ok, s_glow_bank_ok);
         fflush(stdout);
     }
