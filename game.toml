@@ -20,13 +20,19 @@ bin_name = "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).bin"
 cue_name = "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl).cue"
 boot_exe = "SLES_033.98"
 known_sizes = [269120544]
+# First entry: a clean dump (every sector's EDC checks out). Second: a dump
+# with 78 misread sectors (track data, XA music, FMV); the mod's track data
+# fix repairs its track files.
 known_md5 = [
+  "7db3b977777ed5541869d0a4c780ec18",
   "145753eb5a111b35384888687422f54e",
 ]
 known_sha1 = [
+  "9beda518522895aa8450eb6a37cc7df7ee9ca19e",
   "62dc19d14792a09c8ab8ce1400ba8efe65e54d93",
 ]
 known_crc32 = [
+  "b3a09f39",
   "8fe50139",
 ]
 

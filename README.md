@@ -75,21 +75,25 @@ VSync on high-refresh monitors, skip the intro videos.
   through walls.
 - Two-player end-of-race camera cuts no longer flash shrunken prompts and
   stale margins for a frame.
-- Damaged track data on the European disc (see below).
+- Repairs the track data of dumps with read errors (see below).
 
 Plus everything psxrecomp provides: high internal resolution, texture
 filtering, save states, controller rumble.
 
-## Damaged track data on the European disc
+## Disc dumps
 
-The European disc has about 45 two-byte values overwritten (`3E 3E` where the
-USA release has `80 3F` / `10 3F`) in ten track files. The visible results
-were broken textures and geometry on Skate Park, Pier, Car Lot, Cinema and
-Neighbourhood. The **Track data fix** feature (Fixes group, on by default)
-restores those values while the disc is read, so the tracks come out byte for
-byte like the USA release. It is a list of 46 guarded patches in the mod
-manifest: no game data is shipped, and nothing is changed if the expected
-European bytes are not found.
+Two dumps of the European disc (SLES-03398) are accepted. The first is clean:
+every sector's error-detection code checks out. The second, the dump this
+project was first built from, has 78 misread sectors: about 45 values in ten
+track files (`3E 3E` where the disc has `80 3F` / `10 3F`), which break
+textures and geometry on Skate Park, Pier, Car Lot, Cinema and Neighbourhood,
+plus a few music, voice and video sectors.
+
+The **Track data fix** feature (Fixes group, on by default) restores those
+track values while the disc is read. It is a list of guarded patches in the
+mod manifest: no game data is shipped, and on a clean dump it changes
+nothing. If your dump is rejected, make a fresh one with
+[redumper](https://github.com/superg/redumper).
 
 The runtime can also read any file placed under `disc_override/` next to the
 game executable instead of the one on the disc (same path, e.g.
@@ -100,7 +104,9 @@ game executable instead of the one on the disc (same path, e.g.
 1. Download the latest zip from
    [Releases](https://github.com/IraFunesto/ToyStoryRacerRecomp/releases/latest)
    and extract it into a new folder.
-2. Run `ToyStoryRacer_Recompiled.exe` (Python 3 required).
+2. Run `ToyStoryRacer_Recompiled.exe`. Nothing else needs installing: on
+   first use the launcher downloads its own portable toolchain (CMake, Clang
+   and Python).
 3. Select your own disc (.cue/.bin of SLES-03398) and follow the
    **Generate & rebuild** wizard: the game is compiled on your PC.
 4. Enable **Widescreen** in the launcher's Mods page.

@@ -20,7 +20,7 @@ default_enabled = false
 [[feature]]
 id = "track-data-fix"
 name = "Track data fix"
-description = "Repairs track data that is damaged on the European disc: about 45 values in ten track files were overwritten when the disc was made, which breaks textures and geometry on Skate Park, Pier, Car Lot, Cinema and Neighbourhood. The values are restored to those of the USA release."
+description = "Repairs the track data of disc dumps with read errors: about 45 misread values in ten track files break textures and geometry on Skate Park, Pier, Car Lot, Cinema and Neighbourhood. Changes nothing on a clean dump."
 group = "Fixes"
 default_enabled = true
 
