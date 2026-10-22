@@ -1,3 +1,23 @@
+diff --git a/psxrecomp_cli.py b/psxrecomp_cli.py
+index 964a4a54..2dcb8f2b 100755
+--- a/psxrecomp_cli.py
++++ b/psxrecomp_cli.py
+@@ -213,7 +213,14 @@ def clamp_future_mtimes(
+                 continue
+             if mtime > stamp:
+                 try:
+-                    os.utime(p, (stamp, stamp), follow_symlinks=False)
++                    # Windows has no lutime: os.utime raises
++                    # NotImplementedError for follow_symlinks=False there.
++                    if os.utime in os.supports_follow_symlinks:
++                        os.utime(p, (stamp, stamp), follow_symlinks=False)
++                    elif not p.is_symlink():
++                        os.utime(p, (stamp, stamp))
++                    else:
++                        continue
+                     n += 1
+                 except OSError:
+                     pass
 diff --git a/recompiler/src/code_generator.cpp b/recompiler/src/code_generator.cpp
 index b2eb1a80..53606b8a 100644
 --- a/recompiler/src/code_generator.cpp

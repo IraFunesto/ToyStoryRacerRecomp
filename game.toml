@@ -116,6 +116,27 @@ expected = "0x2042FFDC"
 replacement = "0x2042FFFF"
 note = "addi v0,v0,-1  (was -36)"
 
+# The FMV player overlay hands four buffers from the game's own pool
+# allocator (0x800E4418) to the BIOS free() stub at the end of every movie.
+# The game never calls the BIOS malloc, so this is a game bug. The Sony BIOS
+# free only ORs a flag into the word before the pointer. The OpenBIOS free
+# walks its free list, which the game has overwritten (the heap starts under
+# the overlays), and loops forever: the kit hung after the first intro movie.
+# Make the stub return at once.
+[[recompiler.patch]]
+id = "bios-free-noop-800882D8"
+address = "0x800882D8"
+expected = "0x240A00A0"
+replacement = "0x03E00008"
+note = "jr ra  (was addiu t2,zero,0xA0: A0:34 free)"
+
+[[recompiler.patch]]
+id = "bios-free-noop-800882DC"
+address = "0x800882DC"
+expected = "0x01400008"
+replacement = "0x00000000"
+note = "nop  (was jr t2)"
+
 # Object renderers (pick-up crates 0x80054FD8 and three others) compute an
 # object's view-space position as (object - camera) * view row >> 17 with
 # 32-bit products. The widescreen view matrix has a larger X row, so for an
