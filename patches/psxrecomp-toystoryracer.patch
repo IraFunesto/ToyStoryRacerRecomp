@@ -88,10 +88,22 @@ index 93c8de19..bc9de540 100644
  /* Allocations are fixed during activation. Snapshot allocated bytes, never
   * host pointers; immutable host assets are reconstructed separately. */
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index 471041bd..5d32243d 100644
+index 471041bd..becc7bbe 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
-@@ -105,6 +105,9 @@ int32_t psx_mod_widescreen_x_margin(void);
+@@ -54,6 +54,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+  * blending and destination-mask checks retain per-primitive isolation. Call
+  * from activation or an emulation-thread render boundary. */
+ void psx_mod_set_texture_bank_batching(int enabled);
++/* Default-off GL optimization, the same for VRAM-textured semi triangles
++ * that carry an exact-position trailer (a native scene renderer's packet
++ * arena): batched in painter order on the single-pass dual-source path
++ * instead of one draw each. The game's own primitives keep their isolation. */
++void psx_mod_set_native_packet_batching(int enabled);
+ /* A dedicated GPU-DMA packet arena. Only GT3 commands sourced from this
+  * allocation interpret C1/C2's otherwise-unused high bytes as a bank ID:
+  * id = (C1 >> 24) | ((C2 >> 24) << 8). ID zero uses ordinary VRAM. The rest
+@@ -105,6 +110,9 @@ int32_t psx_mod_widescreen_x_margin(void);
   * compositor translates it by the live reveal, excluding culling guards.
   * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
  void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
@@ -101,7 +113,7 @@ index 471041bd..5d32243d 100644
  /* Exclude a known world packet from screen-space backdrop stretching, even
   * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
  void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
-@@ -340,6 +343,19 @@ enum {
+@@ -340,6 +348,19 @@ enum {
  };
  uint32_t psx_mod_render_pass_status(void);
  int psx_mod_set_auto_skip_fmv(int enabled);
@@ -122,10 +134,10 @@ index 471041bd..5d32243d 100644
   * Draw still artwork behind the game image in OpenGL letterbox/pillarbox
   * margins. The image path is an owner-selected mod resource; with no enabled
 diff --git a/runtime/include/mod_texture_banks.h b/runtime/include/mod_texture_banks.h
-index ed80c0a3..f5a49546 100644
+index ed80c0a3..6101a1f4 100644
 --- a/runtime/include/mod_texture_banks.h
 +++ b/runtime/include/mod_texture_banks.h
-@@ -6,6 +6,9 @@ extern "C" {
+@@ -6,7 +6,11 @@ extern "C" {
  const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* width, uint32_t* height);
  uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_t count);
  int mod_texture_packet_precision(uint32_t source, float q[3], float xy[6]);
@@ -133,8 +145,10 @@ index ed80c0a3..f5a49546 100644
 + * depth, 2 native depth + new view). */
 +int mod_texture_packet_depth_mode(void);
  int mod_texture_bank_batchable(int immutable, int mask_check, int semi);
++int mod_native_packet_batchable(int mask_check, int semi);
  #ifdef __cplusplus
  }
+ #endif
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
 index f12160a7..e81badf5 100644
 --- a/runtime/src/cdrom.c
@@ -508,7 +522,7 @@ index b2857352..10e9751d 100644
  
      if (word_count < 0) {
 diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
-index 44ac6bbb..bd948948 100644
+index 44ac6bbb..1b552673 100644
 --- a/runtime/src/gpu_gl_renderer.c
 +++ b/runtime/src/gpu_gl_renderer.c
 @@ -533,7 +533,7 @@ static GLuint s_tex_prog = 0, s_tex_vao = 0, s_tex_vbo = 0;
@@ -552,7 +566,30 @@ index 44ac6bbb..bd948948 100644
  static const char *TEX_FS =
      "#version 330\n"
      "noperspective in vec2 v_uv; noperspective in vec4 v_col;\n"
-@@ -2454,6 +2458,28 @@ static int   s_tb_semi = -2;
+@@ -1859,6 +1863,22 @@ static void rebuild_mask_stencils(void) {
+ 
+ /* ---- windowed high-resolution surface: mirror plumbing ------------------ */
+ static int hiw_on(void) { return s_hiw && s_hiw_n > 0; }
++/* Deferred native-wide mirror outside windowed mode. Mirroring each batch as
++ * it is flushed binds the wide surface and the hr surface again per batch; a
++ * busy 32:9 frame at 6x (~1000 batches, ~450 mirrored) spent about 9 ms of
++ * GPU time on those render-pass switches alone (Toy Story Racer, RTX 4070).
++ * The windowed mode's queue already replays the mirrors in order, one pass
++ * per wide surface, at every point that changes what they sample or reads or
++ * writes a wide surface; outside windowed mode it now carries the wide
++ * mirrors only. PSX_GL_WIDE_QUEUE=0 restores the immediate mirror. */
++static int s_wq_cfg = -1;
++static int wide_queue_on(void) {
++    if (s_wq_cfg < 0) {
++        const char *e = getenv("PSX_GL_WIDE_QUEUE");
++        s_wq_cfg = (e && e[0] == '0') ? 0 : 1;
++    }
++    return s_wq_cfg && !hiw_on();
++}
+ 
+ /* The first tile that holds all of [x0, x1), or NULL. */
+ static const HiwTile *hiw_tile_holding(int x0, int x1) {
+@@ -2454,6 +2474,28 @@ static int   s_tb_semi = -2;
  static int   s_tb_mask = 0, s_tb_filter = 0;
  static GLuint s_tb_bank_tex;
  static int   s_tb_twin[4] = {0, 0, 0, 0};
@@ -581,7 +618,105 @@ index 44ac6bbb..bd948948 100644
  static uint64_t s_batch_total = 0, s_batch_reason[7];
  
  void gl_renderer_batch_diag(uint64_t out[8]) {
-@@ -2851,6 +2877,34 @@ static void flush_tex_batch(void) {
+@@ -2595,6 +2637,8 @@ typedef struct {
+     GLuint  wfbo;            /* native-wide mirror target, 0: none */
+     int     wdx;             /* its x shift (wide_dx()) */
+     float   wscale, wcenter; /* its backdrop stretch (wide_bd_scale) */
++    int8_t  nd;              /* native-depth mode of a textured batch (0 none) */
++    uint8_t ndclear;         /* clear the wide depth before it (view start) */
+ } HiCmd;
+ static HiCmd  *s_hq = NULL;
+ static int     s_hq_n = 0, s_hq_cap = 0;
+@@ -2682,8 +2726,11 @@ static int hiw_enqueue_geo(const float *verts, int nverts, int semi, int mask,
+  * the state wide_target_begin sets (full-width scissor, the draw area's rows,
+  * the S sample-grid shift) plus each entry's shift and backdrop stretch. */
+ static void hiw_replay_wide(void) {
+-    int S = s_out_scale, any = 0, cur = 0;
++    int S = s_out_scale, any = 0, cur = 0, depth_on = 0;
+     GLuint bound = 0;
++    /* windowed: the wide surfaces take the S sample-grid shift of the
++     * window; otherwise the canonical pass already ran at S */
++    const float wshift = s_hiw ? s_shift_hi : s_shift_hr;
+     for (int i = 0; i < s_hq_n; i++) {
+         const HiCmd *c = &s_hq[i];
+         if (!c->wfbo) continue;
+@@ -2693,10 +2740,10 @@ static void hiw_replay_wide(void) {
+             glViewport(0, 0, g_wide_w * S, VRAM_H * S);
+             glEnable(GL_SCISSOR_TEST);
+             p_glUseProgram(s_geo_prog);
+-            p_glUniform1f(s_geo_uShift, s_shift_hi);
++            p_glUniform1f(s_geo_uShift, wshift);
+             p_glUniform1f(s_geo_uXhalf, (float)g_wide_w / 2.0f);
+             p_glUseProgram(s_tex_prog);
+-            p_glUniform1f(s_tex_uShift, s_shift_hi);
++            p_glUniform1f(s_tex_uShift, wshift);
+             p_glUniform1f(s_tex_uXhalf, (float)g_wide_w / 2.0f);
+             p_glUniform1i(s_uVram, 0);
+             p_glActiveTexture(PSXGL_TEXTURE0);
+@@ -2715,6 +2762,25 @@ static void hiw_replay_wide(void) {
+                 p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
+                 cur = HQ_TEX;
+             }
++            /* native depth, as flush_tex_batch's immediate mirror */
++            if (c->nd) {
++                if (c->ndclear) {
++                    glDisable(GL_SCISSOR_TEST);
++                    glDepthMask(GL_TRUE);
++                    glClear(GL_DEPTH_BUFFER_BIT);
++                    glEnable(GL_SCISSOR_TEST);
++                }
++                glEnable(GL_DEPTH_TEST);
++                glDepthFunc(GL_LEQUAL);
++                glDepthMask((c->semi < 0 && c->nd == 1) ? GL_TRUE : GL_FALSE);
++                p_glUniform1i(s_tex_uZmode, c->nd == 3 ? 2 : 1);
++                depth_on = 1;
++            } else if (depth_on) {
++                glDisable(GL_DEPTH_TEST);
++                glDepthMask(GL_TRUE);
++                p_glUniform1i(s_tex_uZmode, 0);
++                depth_on = 0;
++            }
+             p_glUniform1f(s_tex_uXoff, (float)c->wdx);
+             p_glUniform1f(s_tex_uXscale, c->wscale);
+             p_glUniform1f(s_tex_uXcenter, c->wcenter);
+@@ -2726,6 +2792,14 @@ static void hiw_replay_wide(void) {
+                            s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
+             tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
+         } else {
++            if (depth_on) {
++                glDisable(GL_DEPTH_TEST);
++                glDepthMask(GL_TRUE);
++                p_glUseProgram(s_tex_prog);
++                p_glUniform1i(s_tex_uZmode, 0);
++                depth_on = 0;
++                cur = 0;
++            }
+             if (cur != HQ_GEO) {
+                 p_glUseProgram(s_geo_prog);
+                 p_glBindVertexArray(s_geo_vao);
+@@ -2743,6 +2817,12 @@ static void hiw_replay_wide(void) {
+         }
+     }
+     if (!any) return;
++    if (depth_on) {
++        glDisable(GL_DEPTH_TEST);
++        glDepthMask(GL_TRUE);
++        p_glUseProgram(s_tex_prog);
++        p_glUniform1i(s_tex_uZmode, 0);
++    }
+     p_glUseProgram(s_geo_prog);
+     p_glUniform1f(s_geo_uXscale, 1.0f);
+     p_glUniform1f(s_geo_uXcenter, 0.0f);
+@@ -2757,7 +2837,7 @@ static void hiw_replay_wide(void) {
+  * command touches is not bound. */
+ static void hiw_flush_queue(void) {
+     if (s_hq_n == 0) return;
+-    if (!hiw_on()) { s_hq_n = 0; s_hq_vn = 0; return; }
++    if (!hiw_on() && !wide_queue_on()) { s_hq_n = 0; s_hq_vn = 0; return; }
+     int S = s_out_scale;
+     s_hq_flushes++;
+     for (int t = 0; t < s_hiw_n; t++) {
+@@ -2851,6 +2931,34 @@ static void flush_tex_batch(void) {
      p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
      p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
  
@@ -616,7 +751,21 @@ index 44ac6bbb..bd948948 100644
      tex_batch_draw_passes(nverts, semi);
  
      /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
-@@ -2870,15 +2924,43 @@ static void flush_tex_batch(void) {
+@@ -2862,7 +2970,12 @@ static void flush_tex_batch(void) {
+     /* Windowed high-resolution surface: the same batch at S, queued and
+      * replayed in one render pass at the next sync point (see s_hq), with its
+      * native-wide mirror. No-op unless that mode is engaged. */
+-    if (hiw_on() && hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) mirror = 0;
++    if ((hiw_on() || wide_queue_on()) && hiw_enqueue_tex(nverts, semi, mirror, s_tb_gate)) {
++        HiCmd *qc = &s_hq[s_hq_n - 1];
++        qc->nd = (int8_t)nd;
++        if (nd && s_nd_clear_wide) { qc->ndclear = 1; s_nd_clear_wide = 0; }
++        mirror = 0;
++    }
+ 
+     if (mirror) {   /* native-wide mirror */
+         int dx = wide_dx();
+@@ -2870,15 +2983,43 @@ static void flush_tex_batch(void) {
          gl_perf_mirror_begin();
          wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
          wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
@@ -660,10 +809,41 @@ index 44ac6bbb..bd948948 100644
  /* Flat / gouraud GEO batch — MotK title/char-select starfields issue ~30k/s
   * GP0(68h) 1x1 dots; each was two immediate gpu_triangle draws (BufferData +
   * DrawArrays each). Coalesce opaque/semi-uniform tris into one draw. */
-@@ -3276,6 +3358,28 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -2936,6 +3077,9 @@ static void flush_flat_batch(void) {
+     if (s_fb_n == 0) return;
+     int nverts = s_fb_n, semi = s_fb_semi, mask = s_fb_mask, nl = s_fbl_n;
+     GLenum fmode = s_fb_mode;
++    /* a batch the wide queue cannot carry mirrors immediately: queued
++     * mirrors before it land first */
++    if (wide_queue_on() && s_hq_n && (fmode != GL_TRIANGLES || nl)) hiw_flush_queue();
+     s_fb_n = 0;
+     s_fbl_n = 0;
+ 
+@@ -2953,7 +3097,8 @@ static void flush_flat_batch(void) {
+     else glDrawArrays(fmode, 0, nverts);
+     int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
+                  !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
+-    if (hiw_on() && hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)) mirror = 0;
++    if ((hiw_on() || (wide_queue_on() && fmode == GL_TRIANGLES && !nl)) &&
++        hiw_enqueue_geo(s_fb, nverts, semi, mask, mirror, 0)) mirror = 0;
+ 
+     if (mirror) {
+         int dx = wide_dx();
+@@ -3123,6 +3268,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
+         if (is_line && s_hr_scale > 1) {
+             draw_mode = GL_TRIANGLES; draw_verts = quad; draw_n = 6;
+         }
++        if (wide_queue_on() && s_hq_n) hiw_flush_queue();   /* immediate mirror below */
+         hr_begin(1);
+         if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
+         mask_stencil(s_mask_set);
+@@ -3275,7 +3421,30 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+          * cannot alias a render target, keeps painter order, and still splits
           * on opaque transitions, bank/state changes, masking or subtraction. */
          int isolate = semi >= 0 &&
-             !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi);
+-            !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi);
++            !mod_texture_bank_batchable(s_selected_bank_tex != 0, s_mask_check, semi) &&
++            !(s_pq_valid && mod_native_packet_batchable(s_mask_check, semi));
 +        /* game primitive inside a native-depth view: OT-depth test */
 +        int ndm = s_nd_mode;
 +        float gz = 0.0f;
@@ -689,7 +869,7 @@ index 44ac6bbb..bd948948 100644
          int reason = -1;
          if (s_tb_n > 0) {
              if (s_tb_bank_tex != s_selected_bank_tex) reason = 0;
-@@ -3284,6 +3388,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3284,6 +3453,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
              else if (s_mask_set != s_tb_mask) reason = 2;
              else if (s_tex_filter != s_tb_filter) reason = 3;
              else if (gate != s_tb_gate) reason = 4;
@@ -697,7 +877,7 @@ index 44ac6bbb..bd948948 100644
              else if (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
                       tox != s_tb_twin[2] || toy != s_tb_twin[3]) reason = 5;
          }
-@@ -3295,6 +3400,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3295,6 +3465,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
          if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
              s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
              s_tb_bank_tex = s_selected_bank_tex;
@@ -705,7 +885,7 @@ index 44ac6bbb..bd948948 100644
              s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
          }
          float *vp = &s_tb[s_tb_n * TEXV];
-@@ -3310,6 +3416,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3310,6 +3481,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
              vp[16] = (float)lim[2];  vp[17] = (float)lim[3];
              vp[18] = semi >= 0 ? (float)(semi + 1) : 0.0f;          /* a_semi code */
              vp[19] = s_pq_valid ? s_pq[i] : 0.0f;                   /* a_q; 0 = affine */
@@ -713,7 +893,7 @@ index 44ac6bbb..bd948948 100644
          }
          s_tb_n += 3;
          if (isolate) flush_tex_batch();   /* draw this semi prim alone, in submission order */
-@@ -4229,6 +4336,7 @@ static int init_gpu_raster(void) {
+@@ -4229,6 +4401,7 @@ static int init_gpu_raster(void) {
      s_geo_uXoff  = p_glGetUniformLocation(s_geo_prog, "u_xoff");
      s_geo_uXhalf = p_glGetUniformLocation(s_geo_prog, "u_xhalf");
      s_tex_uXoff  = p_glGetUniformLocation(s_tex_prog, "u_xoff");
@@ -721,7 +901,7 @@ index 44ac6bbb..bd948948 100644
      s_tex_uXhalf = p_glGetUniformLocation(s_tex_prog, "u_xhalf");
      s_geo_uXscale  = p_glGetUniformLocation(s_geo_prog, "u_xscale");
      s_geo_uXcenter = p_glGetUniformLocation(s_geo_prog, "u_xcenter");
-@@ -4298,6 +4406,7 @@ static int init_gpu_raster(void) {
+@@ -4298,6 +4471,7 @@ static int init_gpu_raster(void) {
          p_glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, st, (void*)(14*sizeof(float))); p_glEnableVertexAttribArray(7); /* limits */
          p_glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, st, (void*)(18*sizeof(float))); p_glEnableVertexAttribArray(8); /* semi   */
          p_glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, st, (void*)(19*sizeof(float))); p_glEnableVertexAttribArray(9); /* q      */
@@ -986,10 +1166,24 @@ index 6f63240e..f1208476 100644
      return psx_mod_gpu_dma_resolve_address_for(
          address, mod_gpu_dma_memory_used);
 diff --git a/runtime/src/mod_texture_banks.c b/runtime/src/mod_texture_banks.c
-index d5767db1..2b4ae283 100644
+index d5767db1..043ad11f 100644
 --- a/runtime/src/mod_texture_banks.c
 +++ b/runtime/src/mod_texture_banks.c
-@@ -75,13 +75,24 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
+@@ -21,6 +21,13 @@ int mod_texture_bank_batchable(int immutable, int mask_check, int semi) {
+         (semi == 0 || semi == 1 || semi == 3);
+ }
+ 
++static int native_packet_batching;
++void psx_mod_set_native_packet_batching(int enabled) { native_packet_batching = enabled != 0; }
++int mod_native_packet_batchable(int mask_check, int semi) {
++    return native_packet_batching && !mask_check &&
++        (semi == 0 || semi == 1 || semi == 3);
++}
++
+ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver) {
+     resolve_bank = resolver;
+ }
+@@ -75,13 +82,24 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
      return 0;
  }
  

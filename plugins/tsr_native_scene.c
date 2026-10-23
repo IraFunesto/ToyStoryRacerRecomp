@@ -2071,4 +2071,11 @@ void tsr_native_scene_activate(int enabled, int draw_distance) {
             s_enabled = 0;
         }
     }
+    /* The renderer draws each semi-transparent triangle on its own unless
+     * told it may batch them (painter order kept, single-pass blending):
+     * a busy Toy Store frame had ~800 single-triangle draws, each with its
+     * widescreen-margin copy. Ours (own arena, exact positions) and our
+     * host banks qualify; the game's own primitives keep their isolation. */
+    psx_mod_set_native_packet_batching(s_enabled);
+    psx_mod_set_texture_bank_batching(s_enabled);
 }
