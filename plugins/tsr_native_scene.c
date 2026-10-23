@@ -850,7 +850,12 @@ static void find_marker_slot(Ctx *c) {
     c->marker_entry = c->ot + s_far_cache_off;
 }
 
-static void emit_view_start_marker(Ctx *c) {
+/* Each view's start marker this frame: its packet, the OT entry it is linked
+ * at and that entry's link before it (see view_start_needed). */
+static uint32_t s_view_marker[4], s_view_marker_entry[4], s_view_marker_prev[4];
+
+static void emit_view_start_marker(Ctx *c, int slot) {
+    if (slot >= 0 && slot < 4) s_view_marker[slot] = 0;
     if (s_no_depth || c->out_used + PACKET_BYTES > c->out_cap) return;
     uint32_t ot_entry = c->marker_entry;
     uint8_t *pk = c->out + c->out_used;
@@ -870,8 +875,62 @@ static void emit_view_start_marker(Ctx *c) {
     put32(pk + 40, 0x48545033u);   /* HTP3: view start, clear depth */
     for (int i = 0; i < 3; i++) putf(pk + 44 + i * 4, 1.0f);
     for (int i = 0; i < 3; i++) { putf(pk + 56 + i * 8, c->ofx); putf(pk + 60 + i * 8, c->ofy); }
-    if (ot_ok(c, ot_entry)) psx_mod_write_word(ot_entry, (prev & 0xFF000000u) | (addr & 0x00FFFFFFu));
+    if (ot_ok(c, ot_entry)) {
+        psx_mod_write_word(ot_entry, (prev & 0xFF000000u) | (addr & 0x00FFFFFFu));
+        if (slot >= 0 && slot < 4) {
+            s_view_marker[slot] = addr;
+            s_view_marker_entry[slot] = ot_entry;
+            s_view_marker_prev[slot] = prev & 0x00FFFFFFu;
+        }
+    }
     c->out_used += PACKET_BYTES;
+}
+
+/* Full address of a 24-bit OT link: a native arena packet or main RAM. */
+static uint32_t ot_link_addr(uint32_t link) {
+    for (int b = 0; b < 2; b++) {
+        uint32_t base = s_arena[b] & 0x00FFFFFFu;
+        if (s_arena[b] && link >= base && link - base < ARENA_BYTES)
+            return (s_arena[b] & 0xFF000000u) | link;
+    }
+    return 0x80000000u | link;
+}
+
+/* Is view `i`'s start marker still in its OT entry's chain? The chain ends
+ * at the link the entry had when the marker went in, or at another entry of
+ * the OT (the view's OT base up to one past the marker's entry). */
+static int view_marker_linked(int i) {
+    uint32_t want = s_view_marker[i] & 0x00FFFFFFu, end = s_view_marker_prev[i];
+    uint32_t ot_lo = s_views[i] & 0x00FFFFFFu;
+    uint32_t ot_hi = (s_view_marker_entry[i] & 0x00FFFFFFu) + 4u;
+    uint32_t a = rd32(s_view_marker_entry[i]) & 0x00FFFFFFu;
+    for (int n = 0; n < 4096; n++) {
+        if (a == want) return 1;
+        if (a == end || a == 0x00FFFFFFu || (a >= ot_lo && a <= ot_hi)) return 0;
+        a = rd32(ot_link_addr(a)) & 0x00FFFFFFu;
+    }
+    return 1;   /* too long to follow: assume it is there */
+}
+
+/* Does the view drawing into `ot` need its start (depth-clear marker, OT
+ * depth table)? Yes the first time this frame, and again when the game threw
+ * the frame away and built it once more from a cleared OT (the character
+ * select's camera cuts): the prim cursor does not always go back far enough to
+ * tell (frame_buffer_begin), and without a marker the frame kept the previous
+ * frame's depth in the widescreen margins, where the far wall then failed the
+ * depth test (one frame cut to 4:3). */
+static int view_start_needed(uint32_t ot, int *slot) {
+    for (int i = 0; i < s_nviews; i++) {
+        if (s_views[i] != ot) continue;
+        *slot = i;
+        return s_view_marker[i] != 0u && !view_marker_linked(i);
+    }
+    if (s_nviews >= 4) { *slot = -1; return 0; }
+    *slot = s_nviews;
+    s_views[s_nviews] = ot;
+    s_view_marker[s_nviews] = 0;
+    s_nviews++;
+    return 1;
 }
 
 /* Near reject, back-face cull, texture state and depth-sorted emission of
@@ -1318,10 +1377,9 @@ static void set_ot_depth(Ctx *c) {
  * scenery normally does it; in menus and other scenes without native
  * scenery the models or sprites are the first native packets. */
 static void view_begin(Ctx *c) {
-    for (int i = 0; i < s_nviews; i++) if (s_views[i] == c->ot) return;
-    if (s_nviews >= 4) return;
-    s_views[s_nviews++] = c->ot;
-    emit_view_start_marker(c);
+    int slot;
+    if (!view_start_needed(c->ot, &slot)) return;
+    emit_view_start_marker(c, slot);
     set_ot_depth(c);
 }
 
@@ -1617,9 +1675,8 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     /* A new game frame starts building when the double buffer flips; each
      * view (one per player) has its own OT. */
     int buf = frame_buffer_begin();
-    int first = 1;
-    for (int i = 0; i < s_nviews; i++) if (s_views[i] == ot) first = 0;
-    if (first && s_nviews < 4) s_views[s_nviews++] = ot;
+    int slot;
+    int first = view_start_needed(ot, &slot);
     uint32_t frame = s_frame;
 
     static Ctx c;
@@ -1650,7 +1707,7 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     struct timespec t0, t1;
     timespec_get(&t0, TIME_UTC);
     if (first) {
-        emit_view_start_marker(&c);
+        emit_view_start_marker(&c, slot);
         set_ot_depth(&c);
     }
 
