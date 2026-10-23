@@ -56,6 +56,10 @@ are unchanged.
 and menu art is drawn smaller so it looks sharper next to the high-resolution
 game.
 
+**Track preview camera** — while the camera flies over the track before a
+race, Select holds it in place; then L1 / R1 move it back and forth along its
+path, L2 / R2 four times as fast. Select again lets it fly on.
+
 **Other options**: CPU overclock (races only; keeps two-player races at full
 rate), near-polygon pool size, frame smoothing, race progress bar position,
 VSync on high-refresh monitors, skip the intro videos.
@@ -75,6 +79,17 @@ VSync on high-refresh monitors, skip the intro videos.
   through walls.
 - Two-player end-of-race camera cuts no longer flash shrunken prompts and
   stale margins for a frame.
+- Track seen through a doorway at the sides of a wide view is drawn at once
+  (Toy Store finish), and rooms whose doorway is above or below the view no
+  longer vanish (Car Park pillar, barrier and wall with the camera high).
+- Rooms seen through a doorway keep the scenery above and below it (the far
+  wall of the house's upstairs corridor).
+- No more one-frame gaps in the track ahead (Car Park landings) and no more
+  one-frame 4:3 picture when pressing X or Triangle in the character select.
+- Snow falls across the whole wide view.
+- Faster widescreen rendering: the side margins are drawn in one pass per
+  frame and the scenery's transparent faces in batches (Toy Store worst case:
+  GPU load about 77% -> 32% on an RTX 4070 at 32:9, 6x).
 - Repairs the track data of dumps with read errors (see below).
 
 Plus everything psxrecomp provides: high internal resolution, texture
