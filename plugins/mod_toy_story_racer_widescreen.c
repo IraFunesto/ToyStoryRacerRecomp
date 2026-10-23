@@ -645,6 +645,66 @@ static void ui_zone_pass(void) {
     s_rz_n = 0;
 }
 
+/* ---- track preview camera control -------------------------------------------
+ * Before a race the camera flies along the track by itself. Its place on the
+ * flight path is word +0x5C of each view's camera (array at 0x800C2F20, 0x88
+ * bytes a view, view count byte 0x800A97E4); 0x8006CE2C adds speed * VBlank
+ * delta to it every frame (subtracts it when byte +0x7C is set) and wraps it
+ * to 15 bits, only while the flight path 0x800CCEF4 is set. During the flight
+ * Select holds the camera where it is; while held, L1/R1 move it back and
+ * forth at the flight's own pace, L2/R2 four times as fast. The game does not
+ * use these buttons in the preview. The position is written back at the start
+ * of every frame, before the game's own step. */
+#define FLY_CAMS       0x800C2F20u
+#define FLY_CAM_SIZE   0x88u
+#define FLY_VIEWS      0x800A97E4u
+#define FLY_PATH       0x800CCEF4u
+#define FLY_PAD        0x800AC80Au   /* port 1 buttons, active low */
+#define FLY_VBL_DELTA  0x800A9B94u
+#define FLY_SPEED      0x800A9DE8u   /* gp+0xF98: path units per VBlank, set by that step */
+static int s_fly_hold;
+static uint32_t s_fly_pos[2];
+static uint16_t s_fly_prev_pad;
+static uint32_t s_fly_vb;          /* s_vblank at the last move */
+static void fly_camera_control(void) {
+    if (psx_mod_read_word(FLY_PATH) == 0u) { s_fly_hold = 0; s_fly_prev_pad = 0; return; }
+    uint16_t pad = (uint16_t)~psx_mod_read_half(FLY_PAD);
+    uint16_t pressed = pad & (uint16_t)~s_fly_prev_pad;
+    s_fly_prev_pad = pad;
+    int views = (int8_t)psx_mod_read_byte(FLY_VIEWS);
+    if (views < 1) views = 1;
+    if (views > 2) views = 2;
+    if (pressed & 0x0001u) {   /* Select */
+        s_fly_hold = !s_fly_hold;
+        for (int i = 0; i < views; i++)
+            s_fly_pos[i] = psx_mod_read_word(FLY_CAMS + (uint32_t)i * FLY_CAM_SIZE + 0x5Cu) & 0x7FFFu;
+    }
+    if (!s_fly_hold) return;
+    int32_t vbl = (int32_t)psx_mod_read_word(FLY_VBL_DELTA);
+    if (vbl < 1 || vbl > 8) vbl = 1;
+    int32_t pace = (int32_t)psx_mod_read_word(FLY_SPEED);   /* last frame's step */
+    if (pace < 1 || pace > 1024) pace = 24;
+    /* moves follow the VBlanks that passed (this hook can run more than
+     * once a frame), so R1 goes exactly as fast as the flight itself */
+    int32_t dv = (int32_t)(s_vblank - s_fly_vb);
+    s_fly_vb = s_vblank;
+    if (dv < 0 || dv > 8) dv = 0;
+    int32_t step = 0;
+    if (pad & 0x0400u) step -= pace * dv;       /* L1 */
+    if (pad & 0x0800u) step += pace * dv;       /* R1 */
+    if (pad & 0x0100u) step -= 4 * pace * dv;   /* L2 */
+    if (pad & 0x0200u) step += 4 * pace * dv;   /* R2 */
+    for (int i = 0; i < views; i++) {
+        uint32_t cam = FLY_CAMS + (uint32_t)i * FLY_CAM_SIZE;
+        /* the game steps backwards when +0x7C is set: so does R1 */
+        int32_t s = psx_mod_read_byte(cam + 0x7Cu) ? -step : step;
+        s_fly_pos[i] = (uint32_t)((int32_t)s_fly_pos[i] + s) & 0x7FFFu;
+        /* undo the step the game is about to add, so the view stays put */
+        int32_t own = psx_mod_read_byte(cam + 0x7Cu) ? -pace * vbl : pace * vbl;
+        psx_mod_write_word(cam + 0x5Cu, (uint32_t)((int32_t)s_fly_pos[i] - own) & 0x7FFFu);
+    }
+}
+
 /* Main loop, once per frame right after the VBlank wait: the previous frame's
  * packets are complete (a VBlank can arrive in the middle of an element). */
 #define FRAME_START_FN 0x800723A0u
@@ -653,6 +713,7 @@ static void tsr_frame_start_entry(struct CPUState* cpu, uint32_t address) {
     (void)cpu; (void)address;
     sky_split_flush();
     ui_flush();
+    fly_camera_control();
 }
 
 /* Never fall back to a pillarboxed 4:3 picture after the boot logos: every
