@@ -710,10 +710,64 @@ static void star_wipe_widen(void) {
     }
 }
 
+/* ---- snow ------------------------------------------------------------------
+ * The snowy track's flakes are screen-space POLY_FT4s (semi-transparent,
+ * tpage 0x29, CLUT 0x3E7E, 16x16 texels at u 0x80 v 0xC0) placed over x
+ * 0..512, the 4:3 view: in wider views the snow stopped at the 4:3 edges.
+ * Each flake is copied 512 to the left and to the right where the copy lands
+ * in the view, keeping the snow's density (spreading the flakes instead left
+ * them sparse). The frame's packets lie between the buffer start
+ * (0x800A9E34) and the prim cursor; DrawOTag can run more than once per
+ * frame, so a second pass resumes after the first one's copies. */
+static uint32_t s_snow_fb, s_snow_end;
+static void snow_widen(void) {
+    int32_t m = psx_mod_widescreen_x_margin();
+    if (m <= 0) return;
+    uint32_t fb = psx_mod_read_word(0x800A9E34u), cur = psx_mod_read_word(PRIM_CURSOR);
+    if (!ram_address(fb) || !ram_address(cur) || cur <= fb || cur - fb > 0x40000u) return;
+    uint32_t a = fb;
+    if (fb == s_snow_fb && s_snow_end > fb && s_snow_end <= cur) a = s_snow_end;
+    int32_t w = (int32_t)psx_mod_display_width();
+    if (w <= 0) w = 512;
+    for (a &= ~3u; a + 40u <= cur; a += 4u) {
+        if (psx_mod_read_word(a + 4u) != 0x2E808080u) continue;
+        if ((psx_mod_read_word(a) >> 24) != 9u) continue;
+        if (psx_mod_read_word(a + 12u) != 0x3E7EC080u) continue;
+        if ((psx_mod_read_word(a + 20u) >> 16) != 0x0029u) continue;
+        int32_t lo = 0x7FFF, hi = -0x7FFF;
+        for (int v = 0; v < 4; v++) {
+            int32_t x = (int16_t)psx_mod_read_half(a + 8u + (uint32_t)v * 8u);
+            if (x < lo) lo = x; if (x > hi) hi = x;
+        }
+        for (int dir = -1; dir <= 1; dir += 2) {
+            int32_t dx = dir * 512;
+            if (hi + dx < -m || lo + dx > w + m) continue;
+            uint32_t q = psx_mod_read_word(PRIM_CURSOR);
+            if (!ram_address(q) || q + 40u >= psx_mod_read_word(PRIM_LIMIT)) goto done;
+            for (uint32_t k = 4u; k < 40u; k += 4u) psx_mod_write_word(q + k, psx_mod_read_word(a + k));
+            for (int v = 0; v < 4; v++) {
+                uint32_t o = q + 8u + (uint32_t)v * 8u;
+                psx_mod_write_half(o, (uint16_t)(int16_t)((int16_t)psx_mod_read_half(o) + dx));
+            }
+            /* linked right after the original in its OT chain */
+            uint32_t t = psx_mod_read_word(a);
+            psx_mod_write_word(q, (9u << 24) | (t & 0x00FFFFFFu));
+            psx_mod_write_word(a, (t & 0xFF000000u) | (q & 0x00FFFFFFu));
+            psx_mod_write_word(PRIM_CURSOR, q + 40u);
+            psx_mod_tag_hud_primitive(q, 0);
+        }
+        a += 36u;
+    }
+done:
+    s_snow_fb = fb;
+    s_snow_end = psx_mod_read_word(PRIM_CURSOR);
+}
+
 static void cloud_flush(void);
 /* DrawOTag: the frame's packets are complete, nothing drawn yet. */
 static void tsr_linked_list_hook(void) {
     star_wipe_widen();   /* before anything is appended after the star */
+    snow_widen();
     cloud_flush();
     sky_split_flush();
     ui_flush();

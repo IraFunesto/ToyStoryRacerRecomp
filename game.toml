@@ -1521,6 +1521,24 @@ expected = "0x24060200"
 replacement = "0x24060500"
 note = "portal walk right bound 512 -> 1280 (li a2,1280)"
 
+# The same walk's y bounds (0..256) dropped whole rooms whose doorway was
+# above or below the view, even with parts of the room on screen: in the
+# Car Park a pillar, a barrier and a wall vanished with the camera high
+# (the 4:3 game does it too). Widen them to -512..768.
+[[recompiler.patch]]
+id = "portal-view-y0"
+address = "0x80047914"
+expected = "0x00003821"
+replacement = "0x2407FE00"
+note = "portal walk top bound 0 -> -512 (li a3,-512)"
+
+[[recompiler.patch]]
+id = "portal-view-y1"
+address = "0x800478FC"
+expected = "0x24020100"
+replacement = "0x24020300"
+note = "portal walk bottom bound 256 -> 768 (li v0,768)"
+
 [[recompiler.patch]]
 id = "iconcull-8004E6F8"
 address = "0x8004E6F8"

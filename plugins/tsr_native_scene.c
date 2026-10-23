@@ -296,6 +296,9 @@ static uint32_t level_signature(uint32_t sec) {
 #define MAX_SECTIONS 1024
 static uint8_t  s_sec_native[MAX_SECTIONS];
 static uint8_t  s_sec_sprite[MAX_SECTIONS];
+#define VIS_HOLD 4
+static uint32_t s_held_frame[2][MAX_SECTIONS];   /* s_frame a view last drew it */
+static uint32_t s_held_list[2][MAX_SECTIONS];    /* from which section list */
 static int      s_no_sprites;   /* debug: leave sprite groups to the game */
 static int      s_no_depth;     /* debug: painter order only (HTP1, no marker) */
 static int      s_no_split;     /* debug: no depth-range subdivision */
@@ -428,6 +431,7 @@ static int load_level(void) {
         s_nitems++;
     }
     s_sec_count = n;
+    memset(s_held_frame, 0, sizeof(s_held_frame));   /* a new level's sections */
     for (int t = 0; t < 32; t++) {
         s_tex_tpage[t] = rd16(TEX_TABLE + (uint32_t)t * 16u);
         s_tex_clut[t]  = rd16(TEX_TABLE + (uint32_t)t * 16u + 2u);
@@ -1681,9 +1685,34 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
              * widescreen margins. */
             if (c.rx0 <= -767.0f || c.rx0 == 0.0f) c.rx0 = -1e30f;
             if (c.rx1 >= 1279.0f || c.rx1 == 512.0f) c.rx1 = 1e30f;
+            /* In wide views the doorway's x edges still come from the 4:3
+             * portal walk: track seen through it at the sides stayed black
+             * until the camera entered the area (Toy Store finish). The
+             * game's own x rect tests are off in widescreen
+             * (branch_keep_sites); do the same and keep only y. */
+            if (psx_mod_widescreen_x_margin() > 0) { c.rx0 = -1e30f; c.rx1 = 1e30f; }
         }
         emit_item(&c, &s_items[item]);
         drawn++;
+        if (view >= 0 && view < 2 && idx < MAX_SECTIONS) {
+            s_held_frame[view][idx] = frame;
+            s_held_list[view][idx] = list;
+        }
+    }
+    /* The game drops a whole area's sections from a view's list for single
+     * frames (a kart landing in the Car Park: the track ahead blinked out).
+     * Sections this list carried within the last VIS_HOLD frames but not in
+     * this one are drawn anyway. */
+    if (mode == 0 && view >= 0 && view < 2) {
+        c.rect_on = 0;
+        for (uint32_t k = 0; k < s_sec_count && k < MAX_SECTIONS; k++) {
+            uint32_t f = s_held_frame[view][k];
+            if (s_held_list[view][k] != list || f == 0u || f == frame || frame - f > VIS_HOLD) continue;
+            int item = s_sec_item[k];
+            if (item < 0 || (s_no_sprites && s_items[item].kind)) continue;
+            emit_item(&c, &s_items[item]);
+            drawn++;
+        }
     }
     cpu->gpr[5] = kept;
     timespec_get(&t1, TIME_UTC);
