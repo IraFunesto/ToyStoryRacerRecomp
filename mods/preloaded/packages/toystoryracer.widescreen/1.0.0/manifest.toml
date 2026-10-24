@@ -13,9 +13,9 @@ game_id = "SLES-03398"
 [[feature]]
 id = "widescreen"
 name = "Widescreen"
-description = "Disabled by default. Renders a wider field of view instead of stretching the 4:3 picture. Menus and videos stay 4:3."
+description = "On by default. Renders a wider field of view instead of stretching the 4:3 picture, and carries the native scenery renderer, 50 fps races and the other options below. Videos stay 4:3."
 group = "Display"
-default_enabled = false
+default_enabled = true
 
 [[feature]]
 id = "track-data-fix"
@@ -28,7 +28,7 @@ default_enabled = true
 feature = "widescreen"
 id = "aspect"
 label = "Aspect ratio"
-description = "Fit follows the shape of the window, starting from 16:9. The other choices are fixed."
+description = "Fit follows the shape of the window, which first opens in the shape of your monitor. The other choices are fixed."
 group = "Display"
 type = "choice"
 default = "fit"

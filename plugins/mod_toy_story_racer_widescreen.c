@@ -1387,6 +1387,34 @@ static void tsr_vblank(void) {
         gl_renderer_set_swap_interval(1);
 }
 
+/* Fit to window opens its first window in the shape of the primary monitor
+ * (a 3440x1440 monitor starts at 43:18, not 16:9); the view then follows the
+ * window. The runtime takes terms up to 99 and 4:3 through 32:9. The screen
+ * size keeps its aspect even when the process is DPI-virtualised. */
+#if defined(_WIN32)
+__declspec(dllimport) int __stdcall GetSystemMetrics(int index);
+#endif
+static void desktop_aspect(unsigned* num, unsigned* den) {
+#if defined(_WIN32)
+    unsigned w = (unsigned)GetSystemMetrics(0);   /* SM_CXSCREEN */
+    unsigned h = (unsigned)GetSystemMetrics(1);   /* SM_CYSCREEN */
+    if (w == 0u || h == 0u) return;
+    if (3u * w < 4u * h) { *num = 4u; *den = 3u; return; }
+    if (9u * w > 32u * h) { *num = 32u; *den = 9u; return; }
+    unsigned a = w, b = h;
+    while (b) { unsigned t = a % b; a = b; b = t; }
+    w /= a; h /= a;
+    if (w > 99u || h > 99u) {   /* nearest ratio whose terms fit */
+        unsigned d = (unsigned)(99.0 * h / w);
+        w = (unsigned)((double)w * d / h + 0.5);
+        h = d;
+    }
+    *num = w; *den = h;
+#else
+    (void)num; (void)den;
+#endif
+}
+
 static void tsr_widescreen_activate(void) {
     char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], native[16], fmv[16], fps[16];
     unsigned num = 16u, den = 9u;
@@ -1415,6 +1443,7 @@ static void tsr_widescreen_activate(void) {
     if (strcmp(aspect, "16-9") == 0) { fit = 0; }
     else if (strcmp(aspect, "21-9") == 0) { num = 21u; fit = 0; }
     else if (strcmp(aspect, "32-9") == 0) { num = 32u; fit = 0; }
+    else desktop_aspect(&num, &den);
 
     s_force_vsync = 1;
     if (psx_mod_option_value(PKG, FEATURE, "high_refresh_vsync", vsync, sizeof vsync) &&

@@ -31,8 +31,16 @@ a native 3D renderer for the tracks and a set of fixes on top.
 All enhancements live in the bundled **Toy Story Racer Widescreen** mod
 package (launcher → Mods) and can be switched off.
 
+On a first start the game is set up the way it is meant to be played:
+widescreen with the native renderer on, the window opening in the shape of
+your monitor, 960-line internal resolution with bilinear filtering, and the
+framework's CD Speed, Fast Loading (uncapped) and PGXP packages on. Every
+one of them can be changed in the launcher (Settings and Mods); an existing
+install keeps its own choices.
+
 **Widescreen** (fit to window, 16:9, 21:9 or 32:9) — a real wider field of
-view, not a stretched picture:
+view, not a stretched picture; Fit to window first opens in the shape of
+your monitor:
 - tracks and objects are drawn all the way to the screen edges, in one and two
   player races; the cloud sky of the title and level select fills the width
   too;
@@ -124,7 +132,8 @@ game executable instead of the one on the disc (same path, e.g.
    and Python).
 3. Select your own disc (.cue/.bin of SLES-03398) and follow the
    **Generate & rebuild** wizard: the game is compiled on your PC.
-4. Enable **Widescreen** in the launcher's Mods page.
+4. Press **Play**: widescreen and the native renderer are already on; the
+   launcher's Mods page has every option.
 
 The download contains no game data and no Sony BIOS; OpenBIOS (MIT-licensed)
 is used when you do not provide your own.

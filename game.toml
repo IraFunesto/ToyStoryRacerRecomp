@@ -52,6 +52,11 @@ overlay_cache = true
 [video]
 renderer = "opengl"
 aspect_ratio = "4:3"
+# First-run look (the launcher's Display settings override it): 960 lines
+# (4x) keeps the native scenery sharp and 50 fps races cheap on most GPUs.
+internal_resolution = 960
+texture_filtering = "bilinear"
+perspective_texturing = true
 
 [controller]
 default_mode = "digital"
