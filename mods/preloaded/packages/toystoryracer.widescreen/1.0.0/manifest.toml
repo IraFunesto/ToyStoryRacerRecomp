@@ -25,9 +25,65 @@ group = "Fixes"
 default_enabled = true
 
 [[feature]]
+id = "quick-start"
+name = "Quick start"
+description = "Starts the game without the logo videos, and optionally in a chosen language straight at the title screen."
+group = "Fixes"
+default_enabled = true
+
+[[option]]
+feature = "quick-start"
+id = "logos"
+label = "Logo videos"
+description = "Skip: the game starts at the language choice, without the Activision, Disney Interactive and Traveller's Tales videos (the game's own path for skipping them). Show: the videos play as on the console."
+group = "Fixes"
+type = "choice"
+default = "skip"
+
+[[option.choice]]
+value = "skip"
+label = "Skip"
+
+[[option.choice]]
+value = "show"
+label = "Show"
+
+[[option]]
+feature = "quick-start"
+id = "language"
+label = "Language"
+description = "Ask: the game's own language choice. Italiano, Español or Nederlands: the game uses that language and goes straight to the title screen (press START), without the language choice and the copyright notice."
+group = "Fixes"
+type = "choice"
+default = "ask"
+
+[[option.choice]]
+value = "ask"
+label = "Ask"
+
+[[option.choice]]
+value = "it"
+label = "Italiano"
+
+[[option.choice]]
+value = "es"
+label = "Español"
+
+[[option.choice]]
+value = "nl"
+label = "Nederlands"
+
+[[feature]]
 id = "file-loading"
 name = "Instant loading"
 description = "Every load is instant: the game's file loads are answered at once from the disc's extracted files (the tsr_data folder next to the game) instead of waiting for the emulated CD drive to seek and read. The music, the character voices and the videos still stream in real time, as on the console. The game receives exactly the same data either way."
+group = "Fixes"
+default_enabled = true
+
+[[feature]]
+id = "card-instant"
+name = "Instant memory card"
+description = "Checking, loading and saving on the memory card are instant: the card's file operations are done at once on the card file (saves/card1.mcd) instead of through the emulated card, which moves one sector every two frames (about 7 seconds to check the card). The card file is written exactly as the console would write it."
 group = "Fixes"
 default_enabled = true
 
@@ -184,23 +240,6 @@ label = "Blend"
 
 [[option]]
 feature = "widescreen"
-id = "skip_videos"
-label = "Skip videos"
-description = "Skips the intro movies (and other videos) as soon as they start, so the game reaches the menus quickly."
-group = "Display"
-type = "choice"
-default = "on"
-
-[[option.choice]]
-value = "on"
-label = "On"
-
-[[option.choice]]
-value = "off"
-label = "Off"
-
-[[option]]
-feature = "widescreen"
 id = "native_scenery"
 label = "Native scenery renderer"
 description = "Draws the track scenery on the PC in full precision instead of the PlayStation pipeline: no vertex wobble or texture warping, no near-camera clipping or polygon pool limits, with a real depth buffer (objects behind walls stay hidden). Karts, pick-ups and the HUD still come from the game. OpenGL renderer."
@@ -278,6 +317,10 @@ id = "toystoryracer.widescreen"
 [[plugin]]
 feature = "file-loading"
 id = "toystoryracer.files"
+
+[[plugin]]
+feature = "card-instant"
+id = "toystoryracer.memcard"
 
 [[patch]]
 feature = "widescreen"
@@ -1143,3 +1186,66 @@ target = "disc_user"
 offset = 192417351              # COURSE_C/BASKET.DAT +0x02E47
 expected = "3e3e"
 replace = "803f"
+
+# Quick start: the power-on logo loop (main loop 0x80072680) plays videos 0..2
+# through 0x80061F44 unless the "seen" flag 0x800A9793 is set and X or START is
+# held; branch straight to that skip path.
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x8007268C
+expected = "07 00 40 10"
+replace = "0b 00 00 10"        # b 0x800726BC (skip the video)
+when = { logos = "skip" }
+
+# Front-end start (0x80081FC4): with the language byte 0x800A9820 still -1
+# the game shows the language choice (menu 6), else the copyright notice
+# (menu 7) unless its shown flag 0x800A9AE0 is set, else the title screen. Both
+# start out in the EXE's data: preset them.
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "03"                 # language 3
+when = { language = "it" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "it" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "04"                 # language 4
+when = { language = "es" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "es" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "05"                 # language 5
+when = { language = "nl" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "nl" }

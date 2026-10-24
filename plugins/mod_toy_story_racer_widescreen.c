@@ -62,8 +62,10 @@ void tsr_native_sprite_list_draw(struct CPUState *cpu, uint32_t address);
 #define SECTION_LIST_FN2 0x80010000u  /* the same, levels without areas */
 void tsr_native_scene_activate(int enabled, int draw_distance);
 int g_tsr_racing;   /* read by the native scenery renderer */
+/* Files loaded by name so far (the loader 0x80064D18 counts them; the game
+ * never reads it): 5 and more once the power-on logos are over. */
 #define INTRO_STAGE 0x800A96B8u
-static int s_skip_intros, s_intro_tapping;
+#define PREVIEW_PATH 0x800CCEF4u   /* the track preview's camera path, 0 otherwise */
 
 /* Frame rate: game.toml makes the main loop's wait threshold (VBlanks per
  * frame, 2 = 25 fps on PAL) the first mod-memory word + 3; the game is
@@ -250,12 +252,10 @@ static uint32_t s_sky_vb = 0x80000000u;   /* VBlank of the last cloud sky (title
 static int sky_recent(void) { return s_vblank - s_sky_vb < 30u; }
 /* native scene: the menus' cloud sky is up (title, level select) */
 int tsr_ui_sky_recent(void) { return sky_recent(); }
-/* Front-end screens (title, menus, character and level select): the boot
- * path leaves stage 35, after the attract demo it stays 41; races and the
- * track preview (38/39) are not. */
+/* Front-end screens (title, menus, character and level select): not a race,
+ * not the track preview (its camera flies a path). */
 static int menu_screen(void) {
-    uint8_t st = psx_mod_read_byte(INTRO_STAGE);
-    return !g_tsr_racing && st != 38u && st != 39u;
+    return !g_tsr_racing && psx_mod_read_word(PREVIEW_PATH) == 0u;
 }
 static uint32_t s_levels_vb = 0x80000000u;   /* VBlank of the last levels-available line */
 #define UI_NUMBER_RA 0x80036188u
@@ -1384,23 +1384,6 @@ static void tsr_vblank(void) {
         psx_mod_write_word(s_fps_word, (s_fps50 &&
                                         (psx_mod_read_byte(SPLIT_SCREEN) == 0u || s_fps50_2p ||
                                          tsr_native_scene_debug_byte(27u) == 1u)) ? 0xFFFFFFFEu : 0xFFFFFFFFu);
-    if (s_skip_intros) {
-        /* Boot stage at 0x800A96B8: 2-3 Disney Interactive logo, 4 the
-         * Traveller's Tales logo, 5 language choice + notices, 35 menus.
-         * The logos are real-time scenes, not MDEC movies, so the
-         * framework's FMV skip does not see them: tap START (press 4,
-         * release 8 VBlanks) while they run and stop before the language
-         * screen, which START would answer. */
-        uint8_t stage = psx_mod_read_byte(INTRO_STAGE);
-        if (stage >= 2u && stage <= 4u) {
-            psx_mod_set_pad_override((s_vblank % 12u) < 4u ? 0xFFF7 : 0xFFFF);
-            s_intro_tapping = 1;
-        } else if (s_intro_tapping) {
-            psx_mod_set_pad_override(-1);
-            s_intro_tapping = 0;
-            if (stage >= 5u) s_skip_intros = 0;   /* once per boot */
-        }
-    }
     {
         /* In a race: the progress bar was drawn recently (one player) or the
          * split-screen flag is set (two players draw a different bar). */
@@ -1448,7 +1431,7 @@ static void desktop_aspect(unsigned* num, unsigned* den) {
 }
 
 static void tsr_widescreen_activate(void) {
-    char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], native[16], fmv[16], fps[16];
+    char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], native[16], fps[16];
     unsigned num = 16u, den = 9u;
     int fit = 1;
 
@@ -1527,12 +1510,9 @@ static void tsr_widescreen_activate(void) {
                        strcmp(native, "on") == 0;
     tsr_native_scene_activate(native_scene, 0);
 
-    /* Skip videos: the framework holds START while an FMV (MDEC + XA)
-     * plays, so the intro movies end at once and the menus come up. */
-    int skip_fmv = !(psx_mod_option_value(PKG, FEATURE, "skip_videos", fmv, sizeof fmv) &&
-                     strcmp(fmv, "off") == 0);
-    (void)psx_mod_set_auto_skip_fmv(skip_fmv);
-    s_skip_intros = skip_fmv;
+    /* The power-on logo videos are the game's only videos; the quick-start
+     * feature skips them itself (manifest patches), else they play. */
+    (void)psx_mod_set_auto_skip_fmv(0);
 
     fprintf(stdout, "TOY STORY RACER WIDESCREEN PLUGIN ACTIVATED (%s, HUD %d%%, vsync %s, CPU %u%%, pool %s, smoothing %s, music change %s, native scenery %s, %s fps)\n",
             aspect, s_hud_percent, s_force_vsync ? "forced" : "runtime",

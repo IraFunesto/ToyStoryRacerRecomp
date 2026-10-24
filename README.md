@@ -53,6 +53,21 @@ on the console. The framework's CD Speed and Fast Loading packages are left
 out of this build: they are not needed, and Fast Loading would speed the
 game itself up while the music streams.
 
+**Instant memory card** (Fixes group, on by default) — checking the card,
+loading and saving are instant. The console's BIOS moves one 128-byte sector
+every two frames, so checking the card took about 8 seconds and every save a
+few more; the game's card calls (Sony's standard card and file functions) are
+now done at once on the card file, `saves/card1.mcd`. The card file is written
+exactly as the console's BIOS writes it — the same directory, blocks and
+data — so it stays a normal memory card image for any emulator.
+
+**Quick start** (Fixes group, on by default) — the game starts at the
+language choice, without the Activision, Disney Interactive and Traveller's
+Tales logo videos (*Logo videos*: Show plays them). *Language*: Italiano,
+Español or Nederlands starts straight at the title screen in that language,
+without the language choice and the copyright notice; Ask (default) keeps the
+game's own choice.
+
 **Widescreen** (fit to window, 16:9, 21:9 or 32:9) — a real wider field of
 view, not a stretched picture; Fit to window first opens in the shape of
 your monitor:
@@ -85,7 +100,7 @@ path, L2 / R2 four times as fast. Select again lets it fly on.
 
 **Other options**: CPU overclock (races only; keeps two-player races at full
 rate), near-polygon pool size, frame smoothing, race progress bar position,
-VSync on high-refresh monitors, skip the intro videos.
+VSync on high-refresh monitors.
 
 **Fixes**
 - Character voices no longer stall the menus while they load.
@@ -156,8 +171,9 @@ is used when you do not provide your own.
 ## Framework changes
 
 The game needs a few additions to psxrecomp (a linked-list hook for the menu
-prompts, disc file overrides, CD/XA loading, GPU packet safety, CPU overclock
-and more). They ship inside the release zip and are kept here as
+prompts, disc file overrides, CD/XA loading, the disc as files, function and
+kernel-call hooks for the instant loading and memory card, GPU packet safety,
+CPU overclock and more). They ship inside the release zip and are kept here as
 `patches/psxrecomp-toystoryracer.patch` against the pinned `psxrecomp`
 submodule commit.
 
