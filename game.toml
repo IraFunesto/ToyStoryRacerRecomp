@@ -40,8 +40,9 @@ known_crc32 = [
 # Plugin hooks (main EXE): HUD faces 0x80038364, rope 0x80039E30, DrawSprite 0x8004DE64.
 # PsyQ CdSearchFile 0x80096168, CdControlB 0x80099428, CdRead 0x80099DE8 and
 # CdReadSync 0x80099F84: answered from extracted files (plugins/tsr_disc_files.c).
+# Video player 0x80061F44: the logo videos skipped (plugins/tsr_quick_start.c).
 mod_function_entry_funcs = ["0x80038364", "0x80039E30", "0x8004DE64", "0x80043538", "0x80011568", "0x80010000", "0x8002207C", "0x8002274C", "0x80023F58", "0x80024568", "0x80012040", "0x80033A84", "0x800723A0", "0x8004E28C", "0x8004DB54", "0x80011C18",
-  "0x80096168", "0x80099428", "0x80099DE8", "0x80099F84"]
+  "0x80096168", "0x80099428", "0x80099DE8", "0x80099F84", "0x80061F44"]
 bios_config = "psxrecomp/bios/SCPH1001.toml"
 seeds = "seeds/ghidra_funcs.txt"
 out_dir = "generated"

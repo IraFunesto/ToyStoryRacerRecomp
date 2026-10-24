@@ -322,6 +322,10 @@ id = "toystoryracer.files"
 feature = "card-instant"
 id = "toystoryracer.memcard"
 
+[[plugin]]
+feature = "quick-start"
+id = "toystoryracer.quickstart"
+
 [[patch]]
 feature = "widescreen"
 target = "main_exe"
@@ -1187,17 +1191,10 @@ offset = 192417351              # COURSE_C/BASKET.DAT +0x02E47
 expected = "3e3e"
 replace = "803f"
 
-# Quick start: the power-on logo loop (main loop 0x80072680) plays videos 0..2
-# through 0x80061F44 unless the "seen" flag 0x800A9793 is set and X or START is
-# held; branch straight to that skip path.
-[[patch]]
-feature = "quick-start"
-target = "main_exe"
-address = 0x8007268C
-expected = "07 00 40 10"
-replace = "0b 00 00 10"        # b 0x800726BC (skip the video)
-when = { logos = "skip" }
-
+# Quick start: the logo videos are skipped by the toystoryracer.quickstart
+# plugin (function-entry hook on the video player 0x80061F44), not by patching
+# the logo loop's branch: patched code runs in the interpreter, and that
+# function is also the game's main loop.
 # Front-end start (0x80081FC4): with the language byte 0x800A9820 still -1
 # the game shows the language choice (menu 6), else the copyright notice
 # (menu 7) unless its shown flag 0x800A9AE0 is set, else the title screen. Both

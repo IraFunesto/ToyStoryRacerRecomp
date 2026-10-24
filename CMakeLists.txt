@@ -84,11 +84,13 @@ target_sources(psx-runtime PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_quick_start.c")
 if(TARGET psx-runtime-pgxp)
     target_sources(psx-runtime-pgxp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_quick_start.c")
 endif()
