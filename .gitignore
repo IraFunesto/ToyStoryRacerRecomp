@@ -117,3 +117,6 @@ disc_override/
 /tools/experiments/
 /tools/pool_*_sites.txt
 /tools/overclock_slider.pyw
+
+# The disc as extracted files ([runtime] disc_folder): game data, never commit.
+tsr_data/

@@ -47,6 +47,12 @@ psxrecomp_add_game_runtime(psx-runtime
     GEN_MARKER "generated/SLES_033.98_dispatch.c"
     GEN_FULL_GLOB "generated/SLES_033.98_full_*.c"
     CODEGEN_SETUP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/codegen_setup.c"
+    # Loads come from extracted files (plugins/tsr_disc_files.c): the CD
+    # speed-ups are not needed, and Fast Loading would speed the game itself
+    # up while the music streams.
+    EXCLUDE_BUILTIN_MODS
+        psx.enhancement.cd-speed
+        psx.enhancement.fast-loading
 )
 
 # The PGXP variant (-DPSX_PGXP_VARIANT=ON) stages the same mods/bundled as the
@@ -76,9 +82,11 @@ endforeach()
 # Game-owned trusted plugin: selects 21:9 for the toystoryracer.widescreen package.
 target_sources(psx-runtime PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c")
 if(TARGET psx-runtime-pgxp)
     target_sources(psx-runtime-pgxp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_native_scene.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c")
 endif()

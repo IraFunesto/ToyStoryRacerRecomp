@@ -1,5 +1,5 @@
 diff --git a/psxrecomp_cli.py b/psxrecomp_cli.py
-index 964a4a54..2dcb8f2b 100755
+index 964a4a54..89d4d5c3 100755
 --- a/psxrecomp_cli.py
 +++ b/psxrecomp_cli.py
 @@ -213,7 +213,14 @@ def clamp_future_mtimes(
@@ -18,8 +18,45 @@ index 964a4a54..2dcb8f2b 100755
                      n += 1
                  except OSError:
                      pass
+@@ -1099,12 +1106,16 @@ def cmd_generate(args: argparse.Namespace, progress: ProgressReporter) -> int:
+ 
+     progress.log(f"generate --disc {disc}")
+     progress.phase("verify", pct=0.05, message=f"Checking disc {disc.name}")
++    # A disc extracted to a folder by the runtime ([runtime] disc_folder): its
++    # .psxdisc layout. The folder was verified sector by sector against the
++    # image it came from; the boot EXE is one of its plain files.
++    folder_disc = disc.suffix.lower() == ".psxdisc"
+     chd_lib = None
+     if disc.suffix.lower() == ".chd" and disc.is_file():
+         chd_lib = ensure_chd_reader(project_root, progress)
+     identity: Optional[dict[str, Any]] = None
+     try:
+-        if disc.is_file():
++        if disc.is_file() and not folder_disc:
+             identity = verify_disc_path(
+                 disc, prep, skip_hash=bool(args.skip_hash_check), progress=progress,
+                 chd_lib=chd_lib,
+@@ -1122,7 +1133,17 @@ def cmd_generate(args: argparse.Namespace, progress: ProgressReporter) -> int:
+         ".iso",
+         ".ISO",
+     )
+-    if need_prep or args.force_prepare:
++    if folder_disc:
++        progress.log(f"disc from the extracted files in {disc.parent}")
++        if need_prep or args.force_prepare:
++            src_boot = disc.parent / boot
++            if not src_boot.is_file():
++                progress.error(f"boot EXE {boot} missing in {disc.parent}", code=EXIT_ERROR)
++                return EXIT_ERROR
++            boot_path.parent.mkdir(parents=True, exist_ok=True)
++            shutil.copy2(src_boot, boot_path)
++            progress.log(f"boot EXE from the extracted files: {boot_path}")
++    elif need_prep or args.force_prepare:
+         try:
+             working_disc = run_prepare_disc(
+                 project_root, config, disc, progress, chd_lib=chd_lib
 diff --git a/recompiler/src/code_generator.cpp b/recompiler/src/code_generator.cpp
-index b2eb1a80..53606b8a 100644
+index b2eb1a80..530b0006 100644
 --- a/recompiler/src/code_generator.cpp
 +++ b/recompiler/src/code_generator.cpp
 @@ -817,6 +817,12 @@ std::string CodeGenerator::generate_branch_condition(uint32_t instr, uint32_t ad
@@ -54,6 +91,26 @@ index b2eb1a80..53606b8a 100644
              std::exit(1);
          }
          // Overlay variant: the configured main-EXE PC holds different code.
+@@ -2897,8 +2911,8 @@ GeneratedFunction CodeGenerator::generate_function(
+     if (config_.mod_function_entry_funcs.count(func.start_addr)) {
+         body_ss << config_.indent
+                 << fmt::format(
+-                       "psx_mod_function_entry(cpu, 0x{:08X}u);"
+-                       "  /* trusted opt-in game-mod hook */\n",
++                       "if (psx_mod_function_entry_done(cpu, 0x{:08X}u)) return;"
++                       "  /* trusted opt-in game-mod hook (may finish the function) */\n",
+                        func.start_addr);
+     }
+     if (config_.ws_sprite_tag_funcs.count(func.start_addr)) {
+@@ -3405,7 +3419,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
+     ss << "#endif\n";
+     ss << "extern int  psx_game_text_native_ok(uint32_t addr);  /* stale-static guard (dispatch shard) */\n";
+     ss << "extern int  psx_datashard_enter(CPUState* cpu, uint32_t key);  /* data-shard replay/capture (data_shards.c) */\n";
+-    ss << "extern void psx_mod_function_entry(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
++    ss << "extern int  psx_mod_function_entry_done(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
+     ss << "extern void psx_datashard_ret(CPUState* cpu);                  /* data-shard capture finalize */\n";
+     ss << "extern int  psx_vsync_query_hle_enter(CPUState* cpu, uint32_t func, uint32_t counter_addr, uint32_t gpustat_ptr_addr, uint32_t timer1_ptr_addr, uint32_t timer1_cache_addr);  /* load_accel.c */\n";
+     ss << "extern void psx_ws_sprite_tag(CPUState* cpu);  /* widescreen prim tag (gpu.c) */\n";
 @@ -3417,6 +3431,8 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
      ss << "extern int  psx_ws_cull_slti(uint32_t sx, uint32_t imm);   /* ws cull signed right edge (gpu.c) */\n";
      ss << "extern int  psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm); /* ws cull signed lower edge (gpu.c) */\n";
@@ -63,11 +120,69 @@ index b2eb1a80..53606b8a 100644
      ss << "extern int  psx_ws_cull_bgez(uint32_t v);                  /* ws cull signed left keep (gpu.c) */\n";
      ss << "extern uint32_t psx_ws_clip_edge_x(uint32_t v, uint32_t w); /* ws cull clip-edge bound load (gpu.c) */\n";
      ss << "extern int  psx_ws_cull_vxrange(uint32_t x, uint32_t imm); /* ws masked-u16 X window */\n";
+diff --git a/recompiler/src/config_loader.cpp b/recompiler/src/config_loader.cpp
+index aa7329e8..7a101f1f 100644
+--- a/recompiler/src/config_loader.cpp
++++ b/recompiler/src/config_loader.cpp
+@@ -476,6 +476,11 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
+     if (runtime.contains("overlay_cache")) {
+         rt.overlay_cache = toml::find<bool>(runtime, "overlay_cache");
+     }
++    if (runtime.contains("disc_folder")) {
++        const auto rel = toml::find<std::string>(runtime, "disc_folder");
++        if (!rel.empty())
++            rt.disc_folder = PSXRecompV4::host_resolve(root, rel).string();
++    }
+     if (runtime.contains("overlay_capture_history")) {
+         rt.overlay_capture_history =
+             toml::find<bool>(runtime, "overlay_capture_history");
+diff --git a/recompiler/src/config_loader.h b/recompiler/src/config_loader.h
+index b2e9a1d2..72070bbb 100644
+--- a/recompiler/src/config_loader.h
++++ b/recompiler/src/config_loader.h
+@@ -274,6 +274,14 @@ struct RuntimeConfig {
+     // overlay bytes to overlay_captures.json for offline compilation.
+     bool                  overlay_cache = false;
+ 
++    // disc_folder: the disc as extracted files, a folder relative to the
++    // project root like memcard_dir (e.g. "tsr_data"; resolved absolute). At the first start the mounted image is
++    // split into it (data files as plain files, XA/STR streams and the
++    // filesystem sectors as raw sectors, verified sector by sector); from then
++    // on every disc read -- boot, loads, streams -- comes from the folder and
++    // the image is no longer needed. Empty = mount the image as usual.
++    std::string           disc_folder;
++
+     // overlay_capture_history: opt-in durable capture history. The runtime
+     // keeps overlay_captures.json as an atomic latest snapshot for the live
+     // compiler and additionally appends every changed coherent snapshot to
+diff --git a/runtime/include/cdrom.h b/runtime/include/cdrom.h
+index 5a33b389..2bbb8c10 100644
+--- a/runtime/include/cdrom.h
++++ b/runtime/include/cdrom.h
+@@ -90,6 +90,10 @@ int  cdrom_disc_select(int index_1based);
+  * of a set have different TOCs, so this is how a caller confirms that a disc
+  * change reached the reader instead of only moving an index. */
+ uint32_t cdrom_mounted_sector_count(void);
++/* Host-side reads of the mounted disc, as the drive delivers them (disc
++ * overrides and sector mods applied), without touching the drive's state. */
++int cdrom_host_read_user_sectors(uint32_t lba, uint32_t count, uint8_t* out);
++int cdrom_host_find_file(const char* path, uint32_t* lba, uint32_t* size);
+ int      cdrom_mounted_track_count(void);
+ 
+ /* FMV auto-skip detection: cdrom_xa_stream_active() lets the frontend detect
 diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
-index ff75e9c3..84155f71 100644
+index ff75e9c3..6a64efd2 100644
 --- a/runtime/include/iso_reader.h
 +++ b/runtime/include/iso_reader.h
-@@ -73,6 +73,7 @@ struct BinSegment {
+@@ -23,6 +23,7 @@
+ namespace PS1 {
+ 
+ struct CHDState;
++struct FolderDiscState;
+ 
+ /**
+  * Information about a file entry in the ISO filesystem
+@@ -73,6 +74,7 @@ struct BinSegment {
      uint32_t      start_lba;     // disc sector of this file's first stored sector
      uint32_t      sector_count;  // sectors stored in this file
      bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
@@ -75,6 +190,44 @@ index ff75e9c3..84155f71 100644
  };
  
  /**
+@@ -207,7 +209,29 @@ public:
+      */
+     size_t GetFileSize(const std::string& path);
+ 
++    /**
++     * The disc as extracted files. A folder made by ExtractToFolder() holds
++     * every file of the disc (Mode 2 Form 1 data files as plain files, every
++     * other file as raw 2352-byte sectors), the sectors no file owns
++     * (filesystem, gaps) as raw sectors in disc_system.bin, and this layout
++     * file at its root. Open() on the layout mounts the folder like an image:
++     * data sectors are rebuilt with their header, subheader, EDC and ECC.
++     */
++    static constexpr const char* kFolderLayoutName = "disc.psxdisc";
++    static bool IsFolderLayout(const std::string& path);
++
++    /**
++     * Split a raw image (.cue/.bin/.chd) into folder. The result is mounted
++     * and compared with the image sector by sector; only a folder that
++     * rebuilds every sector exactly gets its layout file. message (optional)
++     * receives a one-line summary or the reason for refusing.
++     */
++    static bool ExtractToFolder(const std::string& image, const std::string& folder,
++                                std::string* message);
++
+ private:
++    bool OpenFolder(const std::string& layout);
++
+     /**
+      * Parse the Primary Volume Descriptor (sector 16)
+      * Extracts volume ID and root directory information
+@@ -253,6 +277,7 @@ private:
+     std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
+     uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
+     std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
++    std::unique_ptr<FolderDiscState> folder_; // present only for an extracted folder
+     std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
+ };
+ 
 diff --git a/runtime/include/mod_memory.h b/runtime/include/mod_memory.h
 index 93c8de19..bc9de540 100644
 --- a/runtime/include/mod_memory.h
@@ -88,10 +241,43 @@ index 93c8de19..bc9de540 100644
  /* Allocations are fixed during activation. Snapshot allocated bytes, never
   * host pointers; immutable host assets are reconstructed separately. */
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index 471041bd..becc7bbe 100644
+index 471041bd..92c304b3 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
-@@ -54,6 +54,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+@@ -28,6 +28,13 @@ int psx_mod_register_function_entry_plugin(
+  * Hooks match by code address (segment bits ignored) and run only for plugins
+  * the active plan resolved; the table is rebuilt at plugin activation. */
+ void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
++/* The same, for callers that can skip the body: returns 1 (with pc = $ra)
++ * when a hook did the function's work itself (psx_mod_finish_function). */
++int psx_mod_function_entry_done(struct CPUState* cpu, uint32_t address);
++/* From a function-entry callback: the callback did the function's work (its
++ * results in v0/v1 and guest memory); the caller returns to $ra without
++ * running the body. */
++void psx_mod_finish_function(void);
+ /* Active function-entry hook count (0 = none). Hot callers test it before the
+  * call, so a run without an active hook pays one load per interpreted entry. */
+ extern uint32_t g_psx_mod_function_entry_hooks;
+@@ -39,6 +46,18 @@ int psx_mod_game_started(void);
+  * otherwise capacity must hold the entire file. Active sector mods apply. */
+ int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
+                            uint32_t* size);
++/* Where a mounted-disc file starts (logical sector) and its size in bytes. */
++int psx_mod_disc_file_extent(const char* path, uint32_t* lba, uint32_t* size);
++/* User data (2048 bytes each) of count sectors of the mounted disc, as the CD
++ * drive delivers them (disc overrides and sector mods applied, including when
++ * a guarded mod was rejected), without touching the drive's state. */
++int psx_mod_read_cd_sectors(uint32_t lba, uint32_t count, void* out);
++/* Deliver bytes to guest RAM as a completed CD-ROM DMA would (executable
++ * marking, overlay capture, CD DMA log; lba < 0 when unknown). The address
++ * and size must be word aligned. A plugin serving a CD read itself uses this
++ * instead of plain writes, so code it loads is seen like code the drive loads. */
++int psx_mod_dma_write_ram(uint32_t address, const void* data, uint32_t bytes,
++                          int lba);
+ /* Experimental retained-texture service (currently OpenGL only). IDs are
+  * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
+  * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
+@@ -54,6 +73,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
   * blending and destination-mask checks retain per-primitive isolation. Call
   * from activation or an emulation-thread render boundary. */
  void psx_mod_set_texture_bank_batching(int enabled);
@@ -103,7 +289,7 @@ index 471041bd..becc7bbe 100644
  /* A dedicated GPU-DMA packet arena. Only GT3 commands sourced from this
   * allocation interpret C1/C2's otherwise-unused high bytes as a bank ID:
   * id = (C1 >> 24) | ((C2 >> 24) << 8). ID zero uses ordinary VRAM. The rest
-@@ -105,6 +110,9 @@ int32_t psx_mod_widescreen_x_margin(void);
+@@ -105,6 +129,9 @@ int32_t psx_mod_widescreen_x_margin(void);
   * compositor translates it by the live reveal, excluding culling guards.
   * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
  void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
@@ -113,7 +299,7 @@ index 471041bd..becc7bbe 100644
  /* Exclude a known world packet from screen-space backdrop stretching, even
   * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
  void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
-@@ -340,6 +348,19 @@ enum {
+@@ -340,6 +367,19 @@ enum {
  };
  uint32_t psx_mod_render_pass_status(void);
  int psx_mod_set_auto_skip_fmv(int enabled);
@@ -150,7 +336,7 @@ index ed80c0a3..6101a1f4 100644
  }
  #endif
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
-index f12160a7..e81badf5 100644
+index f12160a7..62cf351a 100644
 --- a/runtime/src/cdrom.c
 +++ b/runtime/src/cdrom.c
 @@ -1505,7 +1505,9 @@ static int read_sector_at(int min, int sec, int sect) {
@@ -201,6 +387,26 @@ index f12160a7..e81badf5 100644
  }
  
  /* Savestate post-load: authentic CD second-response delays (ReadTOC ~30M
+@@ -3542,6 +3557,19 @@ uint32_t cdrom_mounted_sector_count(void) {
+     return iso_handle ? iso_sector_count(iso_handle) : 0u;
+ }
+ 
++/* The drive's own disc for host-side reads (mods serving a load themselves):
++ * the same sectors, overrides and sector mods the drive delivers. */
++extern int iso_find_file(void* handle, const char* path, uint32_t* lba, uint32_t* size);
++int cdrom_host_read_user_sectors(uint32_t lba, uint32_t count, uint8_t* out) {
++    if (!iso_handle || !out) return 0;
++    for (uint32_t i = 0; i < count; ++i)
++        if (!iso_read_sector(iso_handle, lba + i, out + (size_t)i * 2048u, 2048)) return 0;
++    return 1;
++}
++int cdrom_host_find_file(const char* path, uint32_t* lba, uint32_t* size) {
++    return iso_handle ? iso_find_file(iso_handle, path, lba, size) : 0;
++}
++
+ int cdrom_mounted_track_count(void) {
+     return iso_handle ? iso_track_count(iso_handle) : 0;
+ }
 diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
 index b8ff2ff7..e343aa24 100644
 --- a/runtime/src/debug_server.c
@@ -261,7 +467,7 @@ index b8ff2ff7..e343aa24 100644
      { "wtrace_dump",         handle_wtrace_dump },
      { "cdrom_timing_dump",   handle_cdrom_timing_dump },
 diff --git a/runtime/src/dirty_ram_interp.c b/runtime/src/dirty_ram_interp.c
-index ef6158b7..80f0e4e3 100644
+index ef6158b7..9f0cf870 100644
 --- a/runtime/src/dirty_ram_interp.c
 +++ b/runtime/src/dirty_ram_interp.c
 @@ -992,8 +992,20 @@ static int psx_mixed_owner_enabled(void) {
@@ -349,11 +555,120 @@ index ef6158b7..80f0e4e3 100644
  #ifdef PSX_ENABLE_BLOCK_CYCLES
          psx_gte_stall(cpu);   /* COP2 reg write stalls to GTE completion */
  #endif
+@@ -2960,8 +2980,10 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
+      * to one load per interpreted entry. */
+     {
+         extern uint32_t g_psx_mod_function_entry_hooks;
+-        extern void psx_mod_function_entry(CPUState *cpu, uint32_t address);
+-        if (g_psx_mod_function_entry_hooks) psx_mod_function_entry(cpu, addr);
++        extern int psx_mod_function_entry_done(CPUState *cpu, uint32_t address);
++        /* a hook that did the function's work returns to $ra (pc set) */
++        if (g_psx_mod_function_entry_hooks && psx_mod_function_entry_done(cpu, addr))
++            OV_FPLOG_RET1();
+     }
+ 
+     /* Per-PC entry counter (visible via dirty_ram_stats). */
+@@ -3350,9 +3372,15 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
+                  * function-entry hooks as a surfaced interpreter entry. */
+                 {
+                     extern uint32_t g_psx_mod_function_entry_hooks;
+-                    extern void psx_mod_function_entry(CPUState *, uint32_t);
+-                    if (g_psx_mod_function_entry_hooks)
+-                        psx_mod_function_entry(cpu, target);
++                    extern int psx_mod_function_entry_done(CPUState *, uint32_t);
++                    if (g_psx_mod_function_entry_hooks &&
++                        psx_mod_function_entry_done(cpu, target)) {
++                        /* the hook did the function's work: back at $ra */
++                        g_dirty_ram_blocks_run++;
++                        if (pc_entry) pc_entry->insns += (uint64_t)insns_executed;
++                        g_dirty_interp_chain_target = cpu->pc;
++                        OV_FPLOG_RET1();
++                    }
+                 }
+                 pc = target;
+                 current_page = target_phys >> 12;
+diff --git a/runtime/src/disc_identity.cpp b/runtime/src/disc_identity.cpp
+index 63ec5c63..1f96e056 100644
+--- a/runtime/src/disc_identity.cpp
++++ b/runtime/src/disc_identity.cpp
+@@ -167,10 +167,12 @@ void fill_toc_from_mount(DiscIdentity& v, const DiscPathResolution& resolved) {
+     v.disc_fp = hex_sha256(toc.str());
+ }
+ 
++/* Images read only through ISOReader: a CHD, or a disc extracted to a
++ * folder (its .psxdisc layout). */
+ bool is_chd_path(const fs::path& path) {
+     std::string ext = path.extension().string();
+     for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+-    return ext == ".chd";
++    return ext == ".chd" || ext == ".psxdisc";
+ }
+ 
+ bool crc32_chd(PS1::ISOReader& disc, uint32_t& result) {
+diff --git a/runtime/src/disc_path.cpp b/runtime/src/disc_path.cpp
+index 50f466dc..b8dbd1b9 100644
+--- a/runtime/src/disc_path.cpp
++++ b/runtime/src/disc_path.cpp
+@@ -124,8 +124,9 @@ DiscPathResolution resolve_disc_path(const fs::path& picked) {
+     if (r.picked.empty()) return r;
+ 
+     // CHD is already a complete image + table of contents. It must not be
+-    // upgraded to a same-stem cue or treated as that cue's raw payload.
+-    if (is_chd(r.picked)) return r;
++    // upgraded to a same-stem cue or treated as that cue's raw payload. The
++    // same holds for a disc extracted to a folder (its .psxdisc layout).
++    if (is_chd(r.picked) || path_has_extension_ci(r.picked, ".psxdisc")) return r;
+ 
+     if (is_cue(r.picked)) {
+         const CueSheet sheet = parse_cue_sheet(r.picked);
 diff --git a/runtime/src/dma.c b/runtime/src/dma.c
-index a75dc88b..4575b8c0 100644
+index a75dc88b..7584708a 100644
 --- a/runtime/src/dma.c
 +++ b/runtime/src/dma.c
-@@ -717,6 +717,23 @@ static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
+@@ -515,6 +515,42 @@ static void start_async_cdrom_transfer(void) {
+     }
+ }
+ 
++/* A CD read served by the host (psx_mod_dma_write_ram): the bytes reach RAM
++ * through the same writes, executable marking, overlay capture and CD DMA
++ * log as a completed channel-3 transfer, without the drive or the channel. */
++int dma_host_cdrom_write(uint32_t dest, const uint8_t *src, uint32_t bytes, int lba) {
++    if ((dest & 3u) || (bytes & 3u) || (!src && bytes)) return 0;
++    const uint32_t addr = DMA_RAM_ADDR(dest);
++    const uint32_t live = psx_ram_live_bytes();
++    if (addr >= live || bytes > live - addr) return 0;
++    if (!bytes) return 1;
++    /* the capture window of the real channel: game data, not FMV buffers */
++    const int capture = addr < 0x1C0000u || addr >= PSX_MAIN_RAM_RETAIL_BYTES;
++    const int saved_ch = g_dma_cur_ch;
++    const uint32_t saved_madr = g_dma_cur_madr, saved_bcr = g_dma_cur_bcr;
++    g_dma_exec_depth++;
++    g_dma_cur_ch = 3;
++    g_dma_cur_bcr = bytes / 4u;
++    if (capture) overlay_capture_before_dma(addr, bytes);
++    for (uint32_t i = 0; i < bytes; i += 4u) {
++        uint32_t word;
++        memcpy(&word, src + i, 4);
++        g_dma_cur_madr = addr + i;
++        psx_write_word(addr + i, word);
++    }
++    dirty_ram_mark_executable_range(addr, bytes);
++    if (capture) {
++        if (lba >= 0) cd_dma_log_push(lba, addr, bytes);
++        extern uint8_t *memory_get_ram_ptr(void);
++        overlay_capture_on_dma(addr, bytes, memory_get_ram_ptr() + addr);
++    }
++    g_dma_cur_ch = saved_ch;
++    g_dma_cur_madr = saved_madr;
++    g_dma_cur_bcr = saved_bcr;
++    g_dma_exec_depth--;
++    return 1;
++}
++
+ static void finish_async_cdrom_transfer(uint32_t final_addr) {
+     finish_cdrom_dma_capture(final_addr, 1);
+     DMAAsyncChannel *a = &cdrom_async;
+@@ -717,6 +753,23 @@ static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
  
      gpu_ws_validate_linked_list_node(addr, num_words);
      gpu_set_gp0_linked_list_node(addr, num_words);
@@ -910,18 +1225,358 @@ index 44ac6bbb..1b552673 100644
  
      p_glGenVertexArrays(1, &s_blit_vao);
 diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
-index af866320..04d90422 100644
+index af866320..bae0cbcd 100644
 --- a/runtime/src/iso_reader.cpp
 +++ b/runtime/src/iso_reader.cpp
-@@ -5,6 +5,7 @@
+@@ -5,7 +5,9 @@
  #include <filesystem>
  #include <algorithm>
  #include <cstring>
 +#include <cstdlib>
  #include <cstdio>
++#include <iterator>
  #include <limits>
  
-@@ -330,6 +331,19 @@ bool ISOReader::Open(const std::string& filename) {
+ namespace PS1 {
+@@ -142,6 +144,324 @@ static bool read_chd_raw(CHDState& chd, uint32_t lba, uint8_t* buffer,
+     return true;
+ }
+ 
++// ---- the disc as extracted files ------------------------------------------
++
++// Mode 2 Form 1 sector rebuild: the EDC and the P/Q parity of the CD-ROM
++// layer, computed as the mastering tools did (the tables of Neill Corlett's
++// ECM), so a rebuilt sector matches the disc byte for byte.
++namespace {
++
++struct EccTables {
++    uint8_t f[256];
++    uint8_t b[256];
++    uint32_t edc[256];
++    EccTables() {
++        for (uint32_t i = 0; i < 256; ++i) {
++            const uint32_t j = (i << 1) ^ ((i & 0x80u) ? 0x11Du : 0u);
++            f[i] = static_cast<uint8_t>(j);
++            b[i ^ (j & 0xFFu)] = static_cast<uint8_t>(i);
++            uint32_t e = i;
++            for (int k = 0; k < 8; ++k) e = (e >> 1) ^ ((e & 1u) ? 0xD8018001u : 0u);
++            edc[i] = e;
++        }
++    }
++};
++
++const EccTables& ecc_tables() {
++    static const EccTables tables;
++    return tables;
++}
++
++uint32_t edc_compute(const uint8_t* src, size_t size) {
++    const EccTables& t = ecc_tables();
++    uint32_t edc = 0;
++    while (size--) edc = (edc >> 8) ^ t.edc[(edc ^ *src++) & 0xFFu];
++    return edc;
++}
++
++void ecc_block(const uint8_t* src, uint32_t major_count, uint32_t minor_count,
++               uint32_t major_mult, uint32_t minor_inc, uint8_t* dest) {
++    const EccTables& t = ecc_tables();
++    const uint32_t size = major_count * minor_count;
++    for (uint32_t major = 0; major < major_count; ++major) {
++        uint32_t index = (major >> 1) * major_mult + (major & 1u);
++        uint8_t a = 0, b = 0;
++        for (uint32_t minor = 0; minor < minor_count; ++minor) {
++            const uint8_t v = src[index];
++            index += minor_inc;
++            if (index >= size) index -= size;
++            a ^= v;
++            b ^= v;
++            a = t.f[a];
++        }
++        a = t.b[t.f[a] ^ b];
++        dest[major] = a;
++        dest[major + major_count] = static_cast<uint8_t>(a ^ b);
++    }
++}
++
++// A whole Mode 2 Form 1 sector from its address, subheader and user data.
++void build_form1_sector(uint32_t lba, const uint8_t sub[4], const uint8_t* user,
++                        uint8_t* out) {
++    out[0] = 0x00;
++    std::memset(out + 1, 0xFF, 10);
++    out[11] = 0x00;
++    const uint32_t a = lba + CD_LEAD_IN_FRAMES;
++    out[12] = binary_to_bcd(a / CD_FRAMES_PER_MINUTE);
++    out[13] = binary_to_bcd((a / CD_FRAMES_PER_SECOND) % 60u);
++    out[14] = binary_to_bcd(a % CD_FRAMES_PER_SECOND);
++    out[15] = 0x02;
++    std::memcpy(out + 16, sub, 4);
++    std::memcpy(out + 20, sub, 4);
++    std::memcpy(out + 24, user, SECTOR_SIZE);
++    const uint32_t edc = edc_compute(out + 16, 8 + SECTOR_SIZE);
++    out[2072] = static_cast<uint8_t>(edc);
++    out[2073] = static_cast<uint8_t>(edc >> 8);
++    out[2074] = static_cast<uint8_t>(edc >> 16);
++    out[2075] = static_cast<uint8_t>(edc >> 24);
++    // Mode 2 parity covers the header as zeros.
++    uint8_t header[4];
++    std::memcpy(header, out + 12, 4);
++    std::memset(out + 12, 0, 4);
++    ecc_block(out + 12, 86, 24, 2, 86, out + 2076);
++    ecc_block(out + 12, 52, 43, 86, 88, out + 2076 + 172);
++    std::memcpy(out + 12, header, 4);
++}
++
++bool parse_hex(const std::string& text, uint8_t* out, size_t bytes) {
++    if (text.size() != bytes * 2) return false;
++    for (size_t i = 0; i < bytes; ++i) {
++        unsigned v = 0;
++        if (std::sscanf(text.c_str() + i * 2, "%2x", &v) != 1) return false;
++        out[i] = static_cast<uint8_t>(v);
++    }
++    return true;
++}
++
++std::string to_hex(const uint8_t* p, size_t bytes) {
++    static const char digits[] = "0123456789abcdef";
++    std::string s;
++    for (size_t i = 0; i < bytes; ++i) {
++        s += digits[p[i] >> 4];
++        s += digits[p[i] & 15];
++    }
++    return s;
++}
++
++constexpr const char* kFolderSystemName = "disc_system.bin";
++// EDC and ECC bytes of data sectors that do not match their data (a dump's
++// misread sectors): kept as on the disc so the sector rebuilds exactly.
++constexpr const char* kFolderEccName = "disc_ecc.bin";
++constexpr size_t kEccOffset = 2072;
++constexpr size_t kEccBytes = RAW_SECTOR_SIZE - kEccOffset;
++
++} // namespace
++
++struct FolderExtent {
++    enum Kind { Plain, Raw, System };
++    uint32_t lba = 0;
++    uint32_t sectors = 0;
++    Kind kind = Raw;
++    uint32_t size = 0;                 // Plain: file bytes
++    uint8_t sub[4] = {};               // Plain: subheader of its sectors...
++    std::vector<std::pair<uint32_t, std::array<uint8_t, 4>>> sub_except;  // ...but these
++    std::vector<std::pair<uint32_t, uint32_t>> ecc_except;  // sector -> disc_ecc.bin record
++    std::string path;                  // Plain/Raw: relative to the folder
++    uint32_t first = 0;                // System: first sector in disc_system.bin
++    std::vector<uint8_t> data;         // Plain: loaded on first read
++    std::unique_ptr<std::ifstream> file;  // Raw/System: opened on first read
++};
++
++struct FolderDiscState {
++    std::filesystem::path dir;
++    uint32_t sector_count = 0;
++    std::vector<FolderExtent> extents;  // sorted by lba, disjoint
++    std::vector<uint8_t> ecc;           // disc_ecc.bin
++};
++
++static FolderExtent* folder_extent_for(FolderDiscState& f, uint32_t lba) {
++    auto it = std::upper_bound(
++        f.extents.begin(), f.extents.end(), lba,
++        [](uint32_t l, const FolderExtent& e) { return l < e.lba; });
++    if (it == f.extents.begin()) return nullptr;
++    --it;
++    return lba - it->lba < it->sectors ? &*it : nullptr;
++}
++
++static bool folder_read_raw(FolderDiscState& f, uint32_t lba, uint8_t* out) {
++    if (lba >= f.sector_count) return false;
++    FolderExtent* e = folder_extent_for(f, lba);
++    if (!e) {
++        std::memset(out, 0, RAW_SECTOR_SIZE);
++        return true;
++    }
++    const uint32_t index = lba - e->lba;
++    if (e->kind == FolderExtent::Plain) {
++        if (e->data.empty() && e->size) {
++            std::ifstream in(f.dir / e->path, std::ios::binary);
++            std::vector<uint8_t> bytes(e->size);
++            in.read(reinterpret_cast<char*>(bytes.data()), e->size);
++            if (in.gcount() != static_cast<std::streamsize>(e->size)) return false;
++            e->data = std::move(bytes);
++        }
++        uint8_t user[SECTOR_SIZE] = {};
++        const uint64_t off = static_cast<uint64_t>(index) * SECTOR_SIZE;
++        if (off < e->size)
++            std::memcpy(user, e->data.data() + off,
++                        std::min<uint64_t>(SECTOR_SIZE, e->size - off));
++        const uint8_t* sub = e->sub;
++        for (const auto& x : e->sub_except)
++            if (x.first == index) { sub = x.second.data(); break; }
++        build_form1_sector(lba, sub, user, out);
++        for (const auto& x : e->ecc_except) {
++            if (x.first != index) continue;
++            const size_t off = static_cast<size_t>(x.second) * kEccBytes;
++            if (off + kEccBytes > f.ecc.size()) return false;
++            std::memcpy(out + kEccOffset, f.ecc.data() + off, kEccBytes);
++            break;
++        }
++        return true;
++    }
++    if (!e->file) {
++        e->file = std::make_unique<std::ifstream>(
++            f.dir / (e->kind == FolderExtent::System ? std::string(kFolderSystemName) : e->path),
++            std::ios::binary);
++        if (!e->file->is_open()) { e->file.reset(); return false; }
++    }
++    const uint64_t sector = (e->kind == FolderExtent::System ? e->first : 0u) + index;
++    e->file->clear();
++    e->file->seekg(static_cast<std::streamoff>(sector * RAW_SECTOR_SIZE), std::ios::beg);
++    e->file->read(reinterpret_cast<char*>(out), RAW_SECTOR_SIZE);
++    const bool ok = e->file->gcount() == static_cast<std::streamsize>(RAW_SECTOR_SIZE);
++    e->file->clear();
++    return ok;
++}
++
++bool ISOReader::IsFolderLayout(const std::string& path) {
++    return PSXRecompV4::path_has_extension_ci(std::filesystem::path(path), ".psxdisc");
++}
++
++bool ISOReader::OpenFolder(const std::string& layout) {
++    std::ifstream in(layout);
++    if (!in.is_open()) return false;
++    auto state = std::make_unique<FolderDiscState>();
++    state->dir = std::filesystem::path(layout).parent_path();
++    std::string line;
++    bool header = false;
++    while (std::getline(in, line)) {
++        if (!line.empty() && line.back() == '\r') line.pop_back();
++        if (line.empty() || line[0] == '#') continue;
++        char kind[16] = {};
++        if (std::sscanf(line.c_str(), "%15s", kind) != 1) continue;
++        const std::string k = kind;
++        if (k == "psxdisc") {
++            unsigned version = 0;
++            if (std::sscanf(line.c_str(), "psxdisc %u", &version) != 1 || version != 1)
++                return false;
++            header = true;
++        } else if (k == "sectors") {
++            unsigned n = 0;
++            if (std::sscanf(line.c_str(), "sectors %u", &n) != 1) return false;
++            state->sector_count = n;
++        } else if (k == "track") {
++            unsigned number = 0, audio = 0, start = 0, pregap = 0;
++            if (std::sscanf(line.c_str(), "track %u %u %u %u",
++                            &number, &audio, &start, &pregap) != 4)
++                return false;
++            CDTrack t;
++            t.number = static_cast<int>(number);
++            t.is_audio = audio != 0;
++            t.start_lba = start;
++            t.pregap_lba = pregap;
++            tracks_.push_back(t);
++        } else if (k == "subq") {
++            unsigned lba = 0;
++            char hex[64] = {};
++            std::array<uint8_t, 12> q = {};
++            if (std::sscanf(line.c_str(), "subq %u %63s", &lba, hex) != 2 ||
++                !parse_hex(hex, q.data(), q.size()))
++                return false;
++            subq_replacements_[lba] = q;
++        } else if (k == "system") {
++            FolderExtent e;
++            e.kind = FolderExtent::System;
++            if (std::sscanf(line.c_str(), "system %u %u %u",
++                            &e.lba, &e.sectors, &e.first) != 3)
++                return false;
++            state->extents.push_back(std::move(e));
++        } else if (k == "raw") {
++            FolderExtent e;
++            e.kind = FolderExtent::Raw;
++            int used = 0;
++            if (std::sscanf(line.c_str(), "raw %u %u %n", &e.lba, &e.sectors, &used) != 2 ||
++                !used)
++                return false;
++            e.path = line.substr(static_cast<size_t>(used));
++            state->extents.push_back(std::move(e));
++        } else if (k == "plain") {
++            FolderExtent e;
++            e.kind = FolderExtent::Plain;
++            char sub[16] = {}, except[4096] = {}, ecc[4096] = {};
++            int used = 0;
++            if (std::sscanf(line.c_str(), "plain %u %u %u %15s %4095s %4095s %n",
++                            &e.lba, &e.sectors, &e.size, sub, except, ecc, &used) != 6 ||
++                !used || !parse_hex(sub, e.sub, 4))
++                return false;
++            if (std::strcmp(ecc, "-") != 0) {
++                for (const char* p = ecc; *p;) {
++                    unsigned index = 0, record = 0;
++                    int n = 0;
++                    if (std::sscanf(p, "%u:%u%n", &index, &record, &n) != 2) return false;
++                    e.ecc_except.emplace_back(index, record);
++                    p += n;
++                    if (*p == ',') ++p;
++                }
++            }
++            if (std::strcmp(except, "-") != 0) {
++                for (const char* p = except; *p;) {
++                    unsigned index = 0;
++                    char hex[9] = {};
++                    int n = 0;
++                    std::array<uint8_t, 4> s = {};
++                    if (std::sscanf(p, "%u:%8[0-9a-fA-F]%n", &index, hex, &n) != 2 ||
++                        !parse_hex(hex, s.data(), 4))
++                        return false;
++                    e.sub_except.emplace_back(index, s);
++                    p += n;
++                    if (*p == ',') ++p;
++                }
++            }
++            e.path = line.substr(static_cast<size_t>(used));
++            state->extents.push_back(std::move(e));
++        }
++    }
++    if (!header || !state->sector_count || tracks_.empty()) return false;
++    {
++        std::ifstream ecc_in(state->dir / kFolderEccName, std::ios::binary);
++        if (ecc_in.is_open())
++            state->ecc.assign(std::istreambuf_iterator<char>(ecc_in),
++                              std::istreambuf_iterator<char>());
++    }
++    std::sort(state->extents.begin(), state->extents.end(),
++              [](const FolderExtent& a, const FolderExtent& b) { return a.lba < b.lba; });
++    for (size_t i = 0; i < state->extents.size(); ++i) {
++        const FolderExtent& e = state->extents[i];
++        if (!e.sectors || e.lba + e.sectors > state->sector_count ||
++            (i && state->extents[i - 1].lba + state->extents[i - 1].sectors > e.lba))
++            return false;
++    }
++    bin_path_ = layout;
++    disc_sector_count_ = state->sector_count;
++    folder_ = std::move(state);
++    is_open_ = true;
++    if (!ParseVolumeDescriptor()) {
++        volume_id_.clear();
++        root_dir_.lba = 0;
++        root_dir_.size = 0;
++    }
++    return true;
++}
++
+ ISOReader::ISOReader()
+     : is_open_(false) {
+     root_dir_.lba = 0;
+@@ -161,6 +481,12 @@ bool ISOReader::Open(const std::string& filename) {
+         return false;
+     }
+ 
++    if (IsFolderLayout(filename)) {
++        if (OpenFolder(filename)) return true;
++        Close();
++        return false;
++    }
++
+     if (PSXRecompV4::path_has_extension_ci(
+             std::filesystem::path(filename), ".chd")) {
+         auto state = std::make_unique<CHDState>();
+@@ -330,6 +656,19 @@ bool ISOReader::Open(const std::string& filename) {
          seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
                                                                   : SECTOR_SIZE));
          seg.start_lba    = 0;  // assigned by the layout pass below
@@ -941,7 +1596,29 @@ index af866320..04d90422 100644
          segments_.push_back(std::move(seg));
      }
  
-@@ -556,6 +570,15 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+@@ -427,6 +766,7 @@ bool ISOReader::Open(const std::string& filename) {
+ 
+ void ISOReader::Close() {
+     chd_.reset();
++    folder_.reset();
+     for (BinSegment& seg : segments_) {
+         if (seg.file.is_open()) {
+             seg.file.close();
+@@ -544,6 +884,13 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+         return true;
+     }
+ 
++    if (folder_) {
++        uint8_t raw[RAW_SECTOR_SIZE];
++        if (!folder_read_raw(*folder_, lba, raw)) return false;
++        std::memcpy(buffer, raw + (raw[15] == 1 ? 16 : RAW_DATA_OFFSET), SECTOR_SIZE);
++        return true;
++    }
++
+     const BinSpan* span = SpanForLBA(lba);
+     if (!span) {
+         return false;
+@@ -556,6 +903,15 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
      BinSegment* seg = &segments_[(size_t)span->segment];
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
  
@@ -957,7 +1634,15 @@ index af866320..04d90422 100644
      // Clear any error flags from a previous failed read
      seg->file.clear();
  
-@@ -616,6 +639,13 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+@@ -599,6 +955,7 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+     }
+ 
+     if (chd_) return read_chd_raw(*chd_, lba, buffer, nullptr);
++    if (folder_) return folder_read_raw(*folder_, lba, buffer);
+ 
+     const BinSpan* span = SpanForLBA(lba);
+     if (!span) {
+@@ -616,6 +973,13 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
      }
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
  
@@ -971,8 +1656,210 @@ index af866320..04d90422 100644
      seg->file.clear();
      std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
      seg->file.seekg(offset, std::ios::beg);
+@@ -963,4 +1327,201 @@ size_t ISOReader::GetFileSize(const std::string& path) {
+     return entry.size;
+ }
+ 
++bool ISOReader::ExtractToFolder(const std::string& image, const std::string& folder,
++                                std::string* message) {
++    namespace fs = std::filesystem;
++    auto fail = [&](const std::string& why) {
++        if (message) *message = why;
++        return false;
++    };
++    ISOReader src;
++    if (!src.Open(image)) return fail("cannot open " + image);
++    if (src.folder_) return fail("the image is already an extracted folder");
++    uint8_t raw[RAW_SECTOR_SIZE];
++    if (!src.ReadRawSector(PVD_SECTOR, raw)) return fail("not a raw (2352-byte sector) image");
++    const uint32_t total = src.GetSectorCount();
++    if (!total || !src.root_dir_.lba) return fail("no ISO 9660 filesystem");
++
++    // Every file, in disc order.
++    struct File { std::string path; uint32_t lba; uint32_t size; uint32_t sectors; };
++    std::vector<File> files;
++    struct Dir { uint32_t lba; uint32_t size; std::string prefix; int depth; };
++    std::vector<Dir> stack{{src.root_dir_.lba, src.root_dir_.size, "", 0}};
++    while (!stack.empty()) {
++        const Dir d = stack.back();
++        stack.pop_back();
++        if (d.depth > 8) return fail("directory tree too deep");
++        for (const ISOFileEntry& e : src.ListFilesByLBA(d.lba, d.size)) {
++            if (e.name.empty() || e.name.find("..") != std::string::npos ||
++                e.name.find_first_of("/\\:") != std::string::npos)
++                return fail("unexpected file name on the disc");
++            if (e.is_directory) {
++                stack.push_back({e.lba, e.size ? e.size : 2048u, d.prefix + e.name + "/",
++                                 d.depth + 1});
++            } else {
++                const uint32_t n = std::max<uint32_t>(1u, (e.size + 2047u) / 2048u);
++                files.push_back({d.prefix + e.name, e.lba, e.size, n});
++            }
++        }
++    }
++    std::sort(files.begin(), files.end(),
++              [](const File& a, const File& b) { return a.lba < b.lba; });
++    for (size_t i = 0; i < files.size(); ++i) {
++        if (files[i].lba + files[i].sectors > total ||
++            (i && files[i - 1].lba + files[i - 1].sectors > files[i].lba))
++            return fail("files overlap or run past the end of the disc: " + files[i].path);
++    }
++
++    const fs::path dir(folder);
++    std::error_code ec;
++    fs::create_directories(dir, ec);
++    fs::remove(dir / kFolderLayoutName, ec);   // never mount a half-made folder
++    const fs::path check = dir / "verify.psxdisc";
++
++    std::string layout = "psxdisc 1\n";
++    layout += "# the disc as extracted files: plain = Mode 2 Form 1 data file (sectors\n"
++              "# rebuilt with header, subheader, EDC, ECC), raw = 2352-byte sectors,\n"
++              "# system = sectors no file owns, raw in disc_system.bin\n";
++    layout += "sectors " + std::to_string(total) + "\n";
++    for (const CDTrack& t : src.tracks_)
++        layout += "track " + std::to_string(t.number) + " " + (t.is_audio ? "1 " : "0 ") +
++                  std::to_string(t.start_lba) + " " + std::to_string(t.pregap_lba) + "\n";
++    for (const auto& q : src.subq_replacements_)
++        layout += "subq " + std::to_string(q.first) + " " + to_hex(q.second.data(), 12) + "\n";
++
++    std::vector<uint8_t> owned(total, 0);
++    std::vector<uint8_t> ecc_records;
++    uint32_t plain_count = 0, raw_count = 0;
++    uint64_t bytes_out = 0;
++    std::vector<uint8_t> sectors, user;
++    uint8_t rebuilt[RAW_SECTOR_SIZE];
++    for (const File& f : files) {
++        sectors.resize(static_cast<size_t>(f.sectors) * RAW_SECTOR_SIZE);
++        for (uint32_t i = 0; i < f.sectors; ++i)
++            if (!src.ReadRawSector(f.lba + i, &sectors[static_cast<size_t>(i) * RAW_SECTOR_SIZE]))
++                return fail("read error at LBA " + std::to_string(f.lba + i));
++        // Plain when every sector is Mode 2 Form 1 and rebuilds exactly from
++        // its subheader and the file's bytes (zero past the end of the file).
++        bool plain = f.size > 0;
++        const uint8_t* sub = &sectors[16];
++        std::string except, ecc_except;
++        int except_count = 0, ecc_count = 0;
++        const size_t ecc_mark = ecc_records.size();
++        user.clear();
++        for (uint32_t i = 0; i < f.sectors && plain; ++i) {
++            const uint8_t* r = &sectors[static_cast<size_t>(i) * RAW_SECTOR_SIZE];
++            if (r[15] != 2 || (r[18] & 0x20u) || std::memcmp(r + 16, r + 20, 4) != 0) {
++                plain = false;
++                break;
++            }
++            if (std::memcmp(r + 16, sub, 4) != 0) {
++                if (++except_count > 64) { plain = false; break; }
++                except += (except.empty() ? "" : ",") + std::to_string(i) + ":" +
++                          to_hex(r + 16, 4);
++            }
++            const uint64_t off = static_cast<uint64_t>(i) * SECTOR_SIZE;
++            const size_t keep = static_cast<size_t>(
++                std::min<uint64_t>(SECTOR_SIZE, f.size > off ? f.size - off : 0));
++            uint8_t data[SECTOR_SIZE] = {};
++            std::memcpy(data, r + RAW_DATA_OFFSET, keep);
++            build_form1_sector(f.lba + i, r + 16, data, rebuilt);
++            if (std::memcmp(rebuilt, r, kEccOffset) != 0) {
++                plain = false;
++                break;
++            }
++            if (std::memcmp(rebuilt + kEccOffset, r + kEccOffset, kEccBytes) != 0) {
++                // a misread sector: its data does not match its EDC/ECC
++                if (++ecc_count > 256) { plain = false; break; }
++                ecc_except += (ecc_except.empty() ? "" : ",") + std::to_string(i) + ":" +
++                              std::to_string(ecc_records.size() / kEccBytes);
++                ecc_records.insert(ecc_records.end(), r + kEccOffset, r + RAW_SECTOR_SIZE);
++            }
++            user.insert(user.end(), data, data + keep);
++        }
++        const fs::path dest = dir / fs::path(f.path);
++        fs::create_directories(dest.parent_path(), ec);
++        std::ofstream out(dest, std::ios::binary | std::ios::trunc);
++        if (plain) {
++            out.write(reinterpret_cast<const char*>(user.data()),
++                      static_cast<std::streamsize>(user.size()));
++            layout += "plain " + std::to_string(f.lba) + " " + std::to_string(f.sectors) + " " +
++                      std::to_string(f.size) + " " + to_hex(sub, 4) + " " +
++                      (except.empty() ? std::string("-") : except) + " " +
++                      (ecc_except.empty() ? std::string("-") : ecc_except) + " " + f.path + "\n";
++            ++plain_count;
++            bytes_out += user.size();
++        } else {
++            ecc_records.resize(ecc_mark);   // this file keeps its own sectors
++            out.write(reinterpret_cast<const char*>(sectors.data()),
++                      static_cast<std::streamsize>(sectors.size()));
++            layout += "raw " + std::to_string(f.lba) + " " + std::to_string(f.sectors) + " " +
++                      f.path + "\n";
++            ++raw_count;
++            bytes_out += sectors.size();
++        }
++        out.close();
++        if (!out) return fail("cannot write " + dest.string());
++        std::fill(owned.begin() + f.lba, owned.begin() + f.lba + f.sectors, 1);
++    }
++
++    // The sectors no file owns: system area, volume descriptors, path
++    // tables, directories, gaps and the run-out after the last file.
++    std::ofstream sys(dir / kFolderSystemName, std::ios::binary | std::ios::trunc);
++    uint32_t sys_index = 0;
++    for (uint32_t lba = 0; lba < total;) {
++        if (owned[lba]) { ++lba; continue; }
++        const uint32_t start = lba, first = sys_index;
++        for (; lba < total && !owned[lba]; ++lba, ++sys_index) {
++            if (!src.ReadRawSector(lba, raw))
++                return fail("read error at LBA " + std::to_string(lba));
++            sys.write(reinterpret_cast<const char*>(raw), RAW_SECTOR_SIZE);
++        }
++        layout += "system " + std::to_string(start) + " " + std::to_string(lba - start) + " " +
++                  std::to_string(first) + "\n";
++    }
++    sys.close();
++    if (!sys) return fail("cannot write " + (dir / kFolderSystemName).string());
++    bytes_out += static_cast<uint64_t>(sys_index) * RAW_SECTOR_SIZE;
++    fs::remove(dir / kFolderEccName, ec);
++    if (!ecc_records.empty()) {
++        std::ofstream eo(dir / kFolderEccName, std::ios::binary | std::ios::trunc);
++        eo.write(reinterpret_cast<const char*>(ecc_records.data()),
++                 static_cast<std::streamsize>(ecc_records.size()));
++        eo.close();
++        if (!eo) return fail("cannot write " + (dir / kFolderEccName).string());
++    }
++    {
++        std::ofstream lay(check, std::ios::binary | std::ios::trunc);
++        lay << layout;
++        lay.close();
++        if (!lay) return fail("cannot write " + check.string());
++    }
++
++    // Mount the folder and compare every sector with the image.
++    ISOReader dst;
++    if (!dst.Open(check.string()) || dst.GetSectorCount() != total ||
++        dst.TrackCount() != src.TrackCount())
++        return fail("the extracted folder does not mount");
++    uint8_t mine[RAW_SECTOR_SIZE];
++    for (uint32_t lba = 0; lba < total; ++lba) {
++        if (!src.ReadRawSector(lba, raw) || !dst.ReadRawSector(lba, mine) ||
++            std::memcmp(raw, mine, RAW_SECTOR_SIZE) != 0)
++            return fail("sector " + std::to_string(lba) + " differs after extraction");
++    }
++    dst.Close();
++    fs::rename(check, dir / kFolderLayoutName, ec);
++    if (ec) return fail("cannot finish " + (dir / kFolderLayoutName).string());
++    if (message) {
++        char line[200];
++        std::snprintf(line, sizeof line,
++                      "%u files (%u data, %u raw streams), %u filesystem sectors, "
++                      "%u sectors with their own EDC/ECC, %.1f MiB; all %u sectors verified",
++                      plain_count + raw_count, plain_count, raw_count, sys_index,
++                      static_cast<unsigned>(ecc_records.size() / kEccBytes),
++                      bytes_out / 1048576.0, total);
++        *message = line;
++    }
++    return true;
++}
++
+ } // namespace PS1
 diff --git a/runtime/src/iso_reader_c.cpp b/runtime/src/iso_reader_c.cpp
-index 0dc8e173..e0c0e460 100644
+index 0dc8e173..a147bcdb 100644
 --- a/runtime/src/iso_reader_c.cpp
 +++ b/runtime/src/iso_reader_c.cpp
 @@ -6,7 +6,99 @@
@@ -1103,8 +1990,26 @@ index 0dc8e173..e0c0e460 100644
      mod_runtime_patch_disc_sector(lba, 1, buffer, 2352);
      return 1;
  }
+@@ -50,6 +149,17 @@ int iso_has_subq_replacements(void* handle) {
+     return handle && static_cast<PS1::ISOReader*>(handle)->HasSubChannelReplacements();
+ }
+ 
++/* A file of the mounted disc: first sector and size in bytes. */
++int iso_find_file(void* handle, const char* path, uint32_t* lba, uint32_t* size) {
++    if (!handle || !path || !lba || !size) return 0;
++    PS1::ISOFileEntry entry;
++    if (!static_cast<PS1::ISOReader*>(handle)->FindFile(path, entry) ||
++        entry.is_directory || !entry.size)
++        return 0;
++    *lba = entry.lba;
++    *size = entry.size;
++    return 1;
++}
+ uint32_t iso_sector_count(void* handle) {
+     if (!handle) return 0;
+     auto* reader = static_cast<PS1::ISOReader*>(handle);
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index a5241863..51d7b603 100644
+index a5241863..09b7b1b2 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1279,6 +1279,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
@@ -1130,7 +2035,79 @@ index a5241863..51d7b603 100644
  extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
      if (enabled != 0 && enabled != 1) {
          std::fprintf(stderr,
-@@ -6773,12 +6782,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -2394,6 +2403,58 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
+     return exe_dir;
+ }
+ 
++/* [runtime] disc_folder: the game's disc as extracted files in a folder of
++ * the project root (where the saves live, shared by the setup launcher and
++ * the built game). The folder is made from the selected image the first
++ * time (split into files and verified sector by sector, see
++ * ISOReader::ExtractToFolder); from then on the folder is the disc for every
++ * reader -- boot, CD drive, mods, launcher -- and the image is no longer
++ * read, nor needed. Without the setting, or when the folder cannot be made,
++ * the image is mounted as usual. */
++static std::string g_disc_folder_name;   /* absolute, from the game config */
++
++/* The extracted folder's layout when it is complete and mounts, else empty. */
++static std::filesystem::path disc_folder_ready(const char* argv0) {
++    namespace fs = std::filesystem;
++    (void)argv0;
++    if (g_disc_folder_name.empty()) return {};
++    const fs::path layout =
++        fs::path(g_disc_folder_name) / PS1::ISOReader::kFolderLayoutName;
++    std::error_code ec;
++    if (!fs::exists(layout, ec)) return {};
++    PS1::ISOReader probe;
++    return probe.Open(layout.string()) ? layout : fs::path{};
++}
++
++static std::filesystem::path mount_disc_folder(const std::filesystem::path& disc,
++                                               const char* argv0) {
++    namespace fs = std::filesystem;
++    if (g_disc_folder_name.empty()) return disc;
++    const fs::path dir(g_disc_folder_name);
++    const fs::path layout = dir / PS1::ISOReader::kFolderLayoutName;
++    std::error_code ec;
++    if (!disc_folder_ready(argv0).empty()) {
++        std::fprintf(stdout, "psxrecomp: disc read from the extracted files in %s\n",
++                     dir.string().c_str());
++        return layout;
++    }
++    if (disc.empty() || !fs::exists(disc, ec) || PS1::ISOReader::IsFolderLayout(disc.string()))
++        return disc;
++    std::fprintf(stdout, "psxrecomp: extracting the disc into %s ...\n",
++                 dir.string().c_str());
++    std::fflush(stdout);
++    std::string message;
++    if (PS1::ISOReader::ExtractToFolder(disc.string(), dir.string(), &message)) {
++        std::fprintf(stdout, "psxrecomp: disc extracted: %s\n", message.c_str());
++        std::fprintf(stdout, "psxrecomp: disc read from the extracted files in %s\n",
++                     dir.string().c_str());
++        return layout;
++    }
++    std::fprintf(stderr, "psxrecomp: disc not extracted (%s); reading the image\n",
++                 message.c_str());
++    return disc;
++}
++
+ static std::filesystem::path resolve_existing_runtime_path(const char* requested,
+                                                            const char* argv0) {
+     namespace fs = std::filesystem;
+@@ -2834,6 +2895,12 @@ static std::filesystem::path resolve_disc_for_runtime(const std::filesystem::pat
+                                                       const char* disc_override,
+                                                       const std::string& game_id,
+                                                       const char* argv0) {
++    /* The disc extracted to its folder is the disc: no image is checked,
++     * asked for or read once it is there ([runtime] disc_folder). */
++    {
++        const std::filesystem::path folder = disc_folder_ready(argv0);
++        if (!folder.empty()) return folder;
++    }
+     if (disc_override && disc_override[0]) {
+         std::filesystem::path p = normalize_disc_path_for_launch(disc_override);
+         return validate_disc_for_launch(p, game_id) ? p : std::filesystem::path{};
+@@ -6773,12 +6840,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Check debug server input override. */
      int override = debug_server_get_input_override();
@@ -1145,6 +2122,34 @@ index a5241863..51d7b603 100644
  #endif
  
      {
+@@ -13030,6 +13098,7 @@ int main(int argc, char** argv) {
+                     gc.netplay_required_disc_fps[i];
+             }
+             if (!gc.discs.empty()) resolved_disc = gc.discs.front();
++            g_disc_folder_name = gc.runtime.disc_folder;
+             if (gc.runtime.has_memcard_dir)  memcard_dir   = gc.runtime.memcard_dir;
+             if (gc.runtime.has_window_title) window_title  = gc.runtime.window_title;
+             if (gc.runtime.has_debug_port)   debug_port    = gc.runtime.debug_port;
+@@ -14203,6 +14272,11 @@ int main(int argc, char** argv) {
+                     resolved_disc = cli_disc;
+             }
+             std::string rui_initial_disc = resolved_disc.string();
++            {
++                /* the extracted folder, when ready, is the disc to show */
++                const std::filesystem::path folder = disc_folder_ready(argv[0]);
++                if (!folder.empty()) rui_initial_disc = folder.string();
++            }
+             std::string rui_title = (game_name.empty() ? std::string("PSX") : game_name)
+                                      + " - Launcher";
+ 
+@@ -14927,6 +15001,7 @@ int main(int argc, char** argv) {
+     if (game_config_path || disc_override_path || !resolved_disc.empty()) {
+         resolved_disc = resolve_disc_for_runtime(
+             resolved_disc, disc_override_path, game_id, argv[0]);
++        resolved_disc = mount_disc_folder(resolved_disc, argv[0]);
+         if (game_config_path && resolved_disc.empty()) {
+             std::fprintf(stderr, "psxrecomp: no disc image selected; exiting.\n");
+             return 1;
 diff --git a/runtime/src/memory.c b/runtime/src/memory.c
 index 6f63240e..f1208476 100644
 --- a/runtime/src/memory.c
@@ -1165,6 +2170,109 @@ index 6f63240e..f1208476 100644
  uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) {
      return psx_mod_gpu_dma_resolve_address_for(
          address, mod_gpu_dma_memory_used);
+diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
+index d5600377..a5bd0ac0 100644
+--- a/runtime/src/mod_runtime.cpp
++++ b/runtime/src/mod_runtime.cpp
+@@ -1,5 +1,6 @@
+ #include "mod_runtime.h"
+ 
++#include "cpu_state.h"
+ #include "disc_path.h"
+ #include "iso_reader.h"
+ #include "mod_packages.h"
+@@ -1407,6 +1408,44 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
+     } catch (...) { return 0; }
+ }
+ 
++extern "C" int cdrom_host_find_file(const char* path, uint32_t* lba, uint32_t* size);
++extern "C" int cdrom_host_read_user_sectors(uint32_t lba, uint32_t count, uint8_t* out);
++
++extern "C" int psx_mod_read_cd_sectors(uint32_t lba, uint32_t count, void* out) {
++    return out && count ? cdrom_host_read_user_sectors(lba, count, static_cast<uint8_t*>(out))
++                        : 0;
++}
++
++extern "C" int psx_mod_disc_file_extent(const char* path, uint32_t* lba,
++                                        uint32_t* size) {
++    using namespace PSXRecompV4;
++    if (lba) *lba = 0;
++    if (size) *size = 0;
++    if (!path || !*path || !lba || !size) return 0;
++    /* the drive's mounted disc: no second reader */
++    if (cdrom_host_find_file(path, lba, size)) return 1;
++    try {
++        const auto& s = state();
++        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
++        if (mount.empty()) return 0;
++        PS1::ISOReader reader;
++        PS1::ISOFileEntry entry;
++        if (!reader.Open(mount.string()) || !reader.FindFile(path, entry) ||
++            entry.is_directory || !entry.size)
++            return 0;
++        *lba = entry.lba;
++        *size = entry.size;
++        return 1;
++    } catch (...) { return 0; }
++}
++
++extern "C" int dma_host_cdrom_write(uint32_t dest, const uint8_t* src, uint32_t bytes,
++                                    int lba);
++extern "C" int psx_mod_dma_write_ram(uint32_t address, const void* data, uint32_t bytes,
++                                     int lba) {
++    return dma_host_cdrom_write(address, static_cast<const uint8_t*>(data), bytes, lba);
++}
++
+ extern "C" void mod_runtime_activate_plugins(void) {
+     using namespace PSXRecompV4;
+     RuntimeMods& s = state();
+@@ -1563,9 +1602,18 @@ extern "C" int psx_mod_register_function_entry_plugin(
+     return mod_register_function_entry_plugin(id, address, callback) ? 1 : 0;
+ }
+ 
+-extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
++/* Set by psx_mod_finish_function() from inside an entry callback. */
++static int s_function_finished;
++
++extern "C" void psx_mod_finish_function(void) {
++    s_function_finished = 1;
++}
++
++/* Runs the hooks at a function entry; with can_skip, a hook that finished
++ * the function stops the rest and the caller returns to $ra. */
++static int run_function_entry_hooks(CPUState* cpu, uint32_t address, int can_skip) {
+     using namespace PSXRecompV4;
+-    if (!g_psx_mod_function_entry_hooks || !cpu) return;
++    if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
+     RuntimeMods& s = state();
+     const auto& table = active_function_entry_hooks();
+     const uint32_t key = function_entry_key(address);
+@@ -1575,9 +1623,25 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
+     for (; it != table.end() && it->key == key; ++it) {
+         const ModResolution::Plugin* previous = s.current_plugin;
+         s.current_plugin = it->plugin;
++        s_function_finished = 0;
+         it->callback(cpu, address);
+         s.current_plugin = previous;
++        const int finished = s_function_finished;
++        s_function_finished = 0;
++        if (finished && can_skip) {
++            cpu->pc = cpu->gpr[31];
++            return 1;
++        }
+     }
++    return 0;
++}
++
++extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
++    (void)run_function_entry_hooks(cpu, address, 0);
++}
++
++extern "C" int psx_mod_function_entry_done(CPUState* cpu, uint32_t address) {
++    return run_function_entry_hooks(cpu, address, 1);
+ }
+ 
+ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
 diff --git a/runtime/src/mod_texture_banks.c b/runtime/src/mod_texture_banks.c
 index d5767db1..043ad11f 100644
 --- a/runtime/src/mod_texture_banks.c

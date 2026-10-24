@@ -34,9 +34,24 @@ package (launcher → Mods) and can be switched off.
 On a first start the game is set up the way it is meant to be played:
 widescreen with the native renderer on, the window opening in the shape of
 your monitor, 960-line internal resolution with bilinear filtering, and the
-framework's CD Speed, Fast Loading (uncapped) and PGXP packages on. Every
-one of them can be changed in the launcher (Settings and Mods); an existing
-install keeps its own choices.
+framework's PGXP package on. Every one of them can be changed in the
+launcher (Settings and Mods); an existing install keeps its own choices.
+
+**The disc as files** — at the first start the game splits your disc image
+into the `tsr_data` folder of the install: every data file as a normal file,
+the music, voices and videos with their full sectors, and the few sectors no
+file owns. Every sector is rebuilt and compared with the image before the
+folder is used. From then on everything — boot, loads, music, voices,
+videos, and Generate & rebuild — comes from that folder: the image is not
+read any more, and is not needed to play. `tsr_data` holds the game's data:
+never share it.
+
+**Instant loading** (Fixes group, on by default) — the game's file loads are
+answered at once from the folder instead of waiting for the emulated CD
+drive to seek and read; the music and voices still stream in real time, as
+on the console. The framework's CD Speed and Fast Loading packages are left
+out of this build: they are not needed, and Fast Loading would speed the
+game itself up while the music streams.
 
 **Widescreen** (fit to window, 16:9, 21:9 or 32:9) — a real wider field of
 view, not a stretched picture; Fit to window first opens in the shape of

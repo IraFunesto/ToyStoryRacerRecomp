@@ -24,6 +24,13 @@ description = "Repairs the track data of disc dumps with read errors: about 45 m
 group = "Fixes"
 default_enabled = true
 
+[[feature]]
+id = "file-loading"
+name = "Instant loading"
+description = "Every load is instant: the game's file loads are answered at once from the disc's extracted files (the tsr_data folder next to the game) instead of waiting for the emulated CD drive to seek and read. The music, the character voices and the videos still stream in real time, as on the console. The game receives exactly the same data either way."
+group = "Fixes"
+default_enabled = true
+
 [[option]]
 feature = "widescreen"
 id = "aspect"
@@ -267,6 +274,10 @@ label = "Lower"
 [[plugin]]
 feature = "widescreen"
 id = "toystoryracer.widescreen"
+
+[[plugin]]
+feature = "file-loading"
+id = "toystoryracer.files"
 
 [[patch]]
 feature = "widescreen"
