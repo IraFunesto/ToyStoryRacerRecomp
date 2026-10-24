@@ -237,6 +237,7 @@ static void tsr_rope_entry(struct CPUState* cpu, uint32_t address) {
 #define UI_FLAG_RA2     0x8003E9D4u
 #define UI_GLOVE_RA1    0x8003E8D4u   /* battle preview gloves (text drawer callers) */
 #define UI_GLOVE_RA2    0x8003EA5Cu
+#define UI_SOLDIER_RA   0x8003D634u   /* winner screen army man (icon drawer caller) */
 static uint32_t s_ui_start;
 static int s_ui_pending, s_ui_edge;   /* edge: 0 = by position, else forced */
 static uint32_t s_ui_str;   /* string of the pending menu element */
@@ -258,7 +259,9 @@ static int menu_screen(void) {
 }
 static uint32_t s_levels_vb = 0x80000000u;   /* VBlank of the last levels-available line */
 #define UI_NUMBER_RA 0x80036188u
-static int s_ui_scale_mid;   /* an unanchored element that still shrinks */   /* icon elements: bytes to take at most */
+static int s_ui_scale_mid;   /* an unanchored element that still shrinks */
+static int s_ui_results;     /* ... about the screen's centre (results screens) */
+#define RESULTS_CENTRE_Y 128   /* icon elements: bytes to take at most */
 /* Button clusters of this frame's prompts (the pad glyphs 'x' 't' 'o' 's'
  * are drawn first): the texts around a cluster take its side, so a whole
  * prompt moves together even when an animated label crosses the middle. */
@@ -421,7 +424,7 @@ static int ui_collect(uint32_t start, uint32_t end, uint32_t *pk, int max) {
 typedef struct {
     uint32_t start, end, ot, ra;
     int8_t edge;
-    uint8_t num, pause, mid, right, has_c;
+    uint8_t num, pause, mid, right, has_c, res;
     int16_t pcx, pcy;
     int8_t rdx, rdy;   /* the part's offset direction from its prompt's centre */
 } UiEl;
@@ -447,8 +450,9 @@ static void ui_flush(void) {
     e.edge = (int8_t)s_ui_edge; e.num = (uint8_t)s_ui_num; e.pause = (uint8_t)s_ui_pause;
     e.mid = (uint8_t)s_ui_scale_mid; e.right = (uint8_t)s_ui_right;
     e.has_c = (uint8_t)s_ui_has_c; e.pcx = s_ui_pcx; e.pcy = s_ui_pcy;
-    e.rdx = s_ui_rdx; e.rdy = s_ui_rdy;
+    e.rdx = s_ui_rdx; e.rdy = s_ui_rdy; e.res = (uint8_t)s_ui_results;
     s_ui_num = 0; s_ui_pause = 0; s_ui_scale_mid = 0; s_ui_right = 0; s_ui_has_c = 0;
+    s_ui_results = 0;
     /* a new frame in the other buffer: the recorded one is complete */
     uint32_t fb = psx_mod_read_word(0x800A9E34u);
     if (s_nel && fb != s_el_fb) ui_process_frame();
@@ -551,6 +555,7 @@ static void ui_process(const UiEl *el, int charsel) {
         edge = charsel ? 0 : pcx < w * 35 / 100 ? -1 : pcx > w * 65 / 100 ? 1 : 0;
         sx = pcx; sy = el->pcy; ayc = el->pcy;
     }
+    if (el->res) sy = RESULTS_CENTRE_Y;   /* the whole screen shrinks as one */
     if (!edge || unanch) {
         /* not anchored: clear any tag left at these addresses by an earlier
          * frame's packet (tags are kept per address for a few frames) */
@@ -842,6 +847,27 @@ static void tsr_linked_list_hook(void) {
     ui_zone_pass();
 }
 
+/* The results screens (race and cup standings, the winner) come from the race
+ * HUD's faces routine 0x80038364 over the cloud sky: each row's points, the
+ * arrow after them and the leader's trophy glyph are texts at the row of a
+ * character's head, the heads and the leader's glow icons; the labels around
+ * them come from 0x8003D3A8/0x8003D494/0x8003D518 (GLOBALE). Shrunk each
+ * about its own centre they slid off the heads' diagonal: all of them shrink
+ * about one point, the screen's centre. In a race the same calls draw the
+ * HUD's faces, which the race HUD code scales (no sky there). */
+static uint32_t s_clouds_vb = 0x80000000u;   /* VBlank of the last sky cloud */
+static int results_screen(void) { return s_vblank - s_clouds_vb < 8u; }
+static int results_text(uint32_t ra) {
+    return results_screen() &&
+           (ra == 0x800393F8u || ra == 0x800394BCu || ra == 0x80039624u ||
+            ra == 0x80039704u || ra == 0x80039804u || ra == 0x80039A0Cu ||
+            ra == 0x8003D3A8u || ra == 0x8003D494u || ra == 0x8003D518u);
+}
+static int results_icon(uint32_t ra) {
+    return results_screen() &&
+           (ra == 0x80039B14u || ra == 0x80039C28u || ra == 0x80039CCCu);
+}
+
 static void tsr_ui_text_entry(struct CPUState* cpu, uint32_t address) {
     (void)address;
     sky_split_flush();
@@ -906,6 +932,7 @@ static void tsr_ui_text_entry(struct CPUState* cpu, uint32_t address) {
         if (ra == 0x8003F4B8u || ra == 0x8003F640u || ra == 0x8003F9B4u) s_ui_lvsel = 1;
         s_ui_scale_mid = ra != 0x8007A934u && ra != 0x80038CB8u && ra != 0x80038D1Cu &&
                          ra != 0x8003CB98u && ra != 0x80037100u;
+        s_ui_results = results_text(ra);
     }
 }
 
@@ -1248,6 +1275,7 @@ static void tsr_ui_icon_entry(struct CPUState* cpu, uint32_t address) {
     sky_split_flush();
     cloud_flush();
     if (ra == CLOUD_RA1 || ra == CLOUD_RA2) {
+        s_clouds_vb = s_vblank;
         s_cloud_start = psx_mod_read_word(PRIM_CURSOR);
         s_cloud_fb = psx_mod_read_word(0x800A9E34u);
         s_cloud_pending = 1;
@@ -1260,8 +1288,10 @@ static void tsr_ui_icon_entry(struct CPUState* cpu, uint32_t address) {
         s_ui_pending = 1;
         s_ui_edge = 1;
         s_ui_maxlen = 64u;
-    } else if (ra == UI_FLAG_RA1 || ra == UI_FLAG_RA2) {
-        /* the track preview's chequered flags (one per player): by side */
+    } else if (ra == UI_FLAG_RA1 || ra == UI_FLAG_RA2 || ra == UI_SOLDIER_RA) {
+        /* the track preview's chequered flags (one per player): by side.
+         * The winner screen's army man too: its shadow is drawn through the
+         * flags' call, and the two must stay together in their corner */
         s_ui_start = psx_mod_read_word(PRIM_CURSOR);
         s_ui_lvsel = 1;   /* not the character select (after the attract
                            * demo the preview's stage number differs) */
@@ -1283,7 +1313,9 @@ static void tsr_ui_icon_entry(struct CPUState* cpu, uint32_t address) {
         /* (the level select's dresser, blocks and level cards are scenery:
          * left at their size) */
         s_ui_scale_mid = ra == 0x8003B6C0u || ra == 0x8003B73Cu ||
-                         ra == 0x8003F1A0u;   /* locked level: Mr. Potato Head */
+                         ra == 0x8003F1A0u ||   /* locked level: Mr. Potato Head */
+                         results_icon(ra);
+        s_ui_results = results_icon(ra);
     }
 }
 
