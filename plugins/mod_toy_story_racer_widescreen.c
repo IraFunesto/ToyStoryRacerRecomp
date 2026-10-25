@@ -58,6 +58,12 @@ void tsr_native_scene_debug_vblank(void);
 unsigned tsr_native_scene_debug_byte(unsigned off);
 void tsr_native_model_draw(struct CPUState *cpu, uint32_t address);
 void tsr_native_sprite_list_draw(struct CPUState *cpu, uint32_t address);
+void tsr_native_particles_draw(struct CPUState *cpu, uint32_t address);
+void tsr_native_shadows_draw(struct CPUState *cpu, uint32_t address);
+void tsr_native_camera_update(struct CPUState *cpu, uint32_t address);
+void tsr_native_path_point(struct CPUState *cpu, uint32_t address);
+void tsr_native_crates_draw(struct CPUState *cpu, uint32_t address);
+void tsr_native_antennas_draw(struct CPUState *cpu, uint32_t address);
 #define SECTION_LIST_FN 0x80011568u   /* per-view visible-section builder (races) */
 #define SECTION_LIST_FN2 0x80010000u  /* the same, levels without areas */
 void tsr_native_scene_activate(int enabled, int draw_distance);
@@ -250,8 +256,6 @@ static int s_ui_legal;   /* the start screen's legal text / PREMI START */
 static int s_ui_right;   /* level select's collectibles counter: anchored right */
 static uint32_t s_sky_vb = 0x80000000u;   /* VBlank of the last cloud sky (title, level select) */
 static int sky_recent(void) { return s_vblank - s_sky_vb < 30u; }
-/* native scene: the menus' cloud sky is up (title, level select) */
-int tsr_ui_sky_recent(void) { return sky_recent(); }
 /* Front-end screens (title, menus, character and level select): not a race,
  * not the track preview (its camera flies a path). */
 static int menu_screen(void) {
@@ -1552,6 +1556,18 @@ PSX_MOD_CONSTRUCTOR(psx_register_toy_story_racer_widescreen_plugin) {
         "toystoryracer.widescreen", 0x80024568u, tsr_native_model_draw);
     (void)psx_mod_register_function_entry_plugin(
         "toystoryracer.widescreen", 0x80012040u, tsr_native_sprite_list_draw);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x80011058u, tsr_native_particles_draw);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x80054558u, tsr_native_antennas_draw);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x80054FD0u, tsr_native_crates_draw);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x80055A24u, tsr_native_shadows_draw);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x8004010Cu, tsr_native_camera_update);
+    (void)psx_mod_register_function_entry_plugin(
+        "toystoryracer.widescreen", 0x8007BCC4u, tsr_native_path_point);
     (void)psx_mod_register_function_entry_plugin(
         "toystoryracer.widescreen", UI_TEXT_FN, tsr_ui_text_entry);
     (void)psx_mod_register_function_entry_plugin(

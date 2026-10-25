@@ -192,6 +192,61 @@ index 5a33b389..2bbb8c10 100644
  int      cdrom_mounted_track_count(void);
  
  /* FMV auto-skip detection: cdrom_xa_stream_active() lets the frontend detect
+diff --git a/runtime/include/debug_server.h b/runtime/include/debug_server.h
+index 27a3d2b9..9f66e79b 100644
+--- a/runtime/include/debug_server.h
++++ b/runtime/include/debug_server.h
+@@ -200,6 +200,11 @@ int debug_server_get_input_override(void);
+  * 0 when the injection is buttons-only. */
+ int debug_server_get_axis_override(unsigned char st[4]);
+ 
++/* Port-2 buttons injected by `press` with "port":2 (16-bit mask, -1 = none).
++ * Read without consuming; the countdown runs in
++ * debug_server_get_input_override(), once per VBlank. */
++int debug_server_get_input_override_p2(void);
++
+ /* TCP-controlled turbo mode. When enabled the frontend skips presentation and
+  * wall-clock pacing at vblank, matching the keyboard TAB turbo path. */
+ int debug_server_turbo_enabled(void);
+diff --git a/runtime/include/gpu_render.h b/runtime/include/gpu_render.h
+index 31c47013..bbc2c467 100644
+--- a/runtime/include/gpu_render.h
++++ b/runtime/include/gpu_render.h
+@@ -60,6 +60,24 @@ void gr_set_precise_triangle(int enabled,
+  * perspective_texturing). q[i] is the normalized 1/z homogeneous weight at
+  * vertex i. enabled == 0 restores the PS1's affine UV interpolation. */
+ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2);
++/* Fractional texture coordinates for the NEXT triangle (u0 v0 u1 v1 u2 v2):
++ * a mod renderer's exact triangles, whose split or clipped corners fall
++ * between texels. lim (lo_u lo_v hi_u hi_v, inclusive; NULL = from the
++ * triangle) is the whole polygon's sampled range, so the pieces of a split
++ * polygon clamp their filtering alike. enabled == 0 clears it; backends
++ * without it draw the integer coordinates given to gr_draw_*_triangle.
++ * Consumed by the next triangle. */
++void gr_set_precise_uv(int enabled, const float uv[6], const int lim[4]);
++
++/* The quad the NEXT triangle is part of, for texture and shading mapped
++ * bilinearly over the whole quad (as the PS1's subdivision of near quads
++ * draws them) whatever triangles it is cut into. In the quad's own plane:
++ * corner 0 at the origin, corner 1 at (1, 0), corner 3 at e3, corner 2 at
++ * (1, 0) + e3 + e4 (e = e3.x e3.y e4.x e4.y); p the triangle's corners in
++ * the same coordinates; uv and col (0xBBGGRR) the quad's corners 0 1 2 3.
++ * enabled == 0 clears it. Consumed by the next triangle. */
++void gr_set_quad_map(int enabled, const float p[6], const float e[4],
++                     const float uv[8], const uint32_t col[4]);
+ 
+ /* Primitives */
+ void gr_fill_rect(int x, int y, int w, int h, uint16_t color);
+@@ -148,6 +166,9 @@ typedef struct GpuRenderBackend {
+                                  int32_t x1, int32_t y1,
+                                  int32_t x2, int32_t y2);
+     void (*set_perspective_triangle)(int enabled, float q0, float q1, float q2);
++    void (*set_precise_uv)(int enabled, const float uv[6], const int lim[4]);
++    void (*set_quad_map)(int enabled, const float p[6], const float e[4],
++                         const float uv[8], const uint32_t col[4]);
+     void (*fill_rect)(int x, int y, int w, int h, uint16_t color);
+     void (*copy_rect)(int src_x, int src_y, int dst_x, int dst_y, int w, int h);
+     void (*draw_flat_triangle)(int x0, int y0, int x1, int y1, int x2, int y2,
 diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
 index ff75e9c3..6a64efd2 100644
 --- a/runtime/include/iso_reader.h
@@ -359,16 +414,24 @@ index 471041bd..02b9a8d1 100644
   * Draw still artwork behind the game image in OpenGL letterbox/pillarbox
   * margins. The image path is an owner-selected mod resource; with no enabled
 diff --git a/runtime/include/mod_texture_banks.h b/runtime/include/mod_texture_banks.h
-index ed80c0a3..6101a1f4 100644
+index ed80c0a3..8fd40640 100644
 --- a/runtime/include/mod_texture_banks.h
 +++ b/runtime/include/mod_texture_banks.h
-@@ -6,7 +6,11 @@ extern "C" {
+@@ -6,7 +6,19 @@ extern "C" {
  const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* width, uint32_t* height);
  uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_t count);
  int mod_texture_packet_precision(uint32_t source, float q[3], float xy[6]);
 +/* Depth mode of the last successful precision lookup (0 none, 1 native
 + * depth, 2 native depth + new view). */
 +int mod_texture_packet_depth_mode(void);
++/* Fractional uv (u0 v0 u1 v1 u2 v2) carried after a precision suffix
++ * ("HTUV" + 6 floats), for a mod arena packet: 1. "HTUL" adds the polygon's
++ * sampled range (lo_u lo_v hi_u hi_v bytes): 2, lim filled. "HTUB" is HTUL
++ * followed by the quad map of gr_set_quad_map: 3. */
++int mod_texture_packet_uv(uint32_t source, float uv[6], int lim[4]);
++/* The quad map after an "HTUB" suffix (see gr_set_quad_map): 1, or 0. */
++int mod_texture_packet_quad(uint32_t source, float p[6], float e[4],
++                            float uv[8], uint32_t col[4]);
  int mod_texture_bank_batchable(int immutable, int mask_check, int semi);
 +int mod_native_packet_batchable(int mask_check, int semi);
  #ifdef __cplusplus
@@ -492,10 +555,32 @@ index f12160a7..62cf351a 100644
      return iso_handle ? iso_track_count(iso_handle) : 0;
  }
 diff --git a/runtime/src/debug_server.c b/runtime/src/debug_server.c
-index b8ff2ff7..e343aa24 100644
+index b8ff2ff7..9e82edc4 100644
 --- a/runtime/src/debug_server.c
 +++ b/runtime/src/debug_server.c
-@@ -9787,6 +9787,43 @@ static void handle_card_trace_dump(int id, const char *json)
+@@ -273,6 +273,8 @@ static uint64_t s_dirty_break_hits = 0;
+ /* ---- Input override ---- */
+ static int s_input_override = -1;
+ static int s_input_frames   = 0;
++static int s_input_override_p2 = -1;   /* press "port":2 */
++static int s_input_frames_p2   = 0;
+ /* Optional analog-stick override (set_input lx/ly/rx/ry, 0..255, 0x80 =
+  * centre). Lets injected input drive analog-mode movement; consumed by the
+  * pad sampler alongside the button word. */
+@@ -7660,6 +7662,12 @@ static void handle_press(int id, const char *json)
+     int buttons = json_get_int(json, "buttons", -1);
+     int frames  = json_get_int(json, "frames", 2);
+     if (buttons < 0) { send_err(id, "missing buttons"); return; }
++    if (json_get_int(json, "port", 1) == 2) {   /* second controller: buttons only */
++        s_input_override_p2 = buttons;
++        s_input_frames_p2   = frames;
++        send_ok(id);
++        return;
++    }
+     s_input_override = buttons;
+     s_input_frames   = frames;
+     int ax[4] = { json_get_int(json, "lx", -1), json_get_int(json, "ly", -1),
+@@ -9787,6 +9795,43 @@ static void handle_card_trace_dump(int id, const char *json)
      free(out);
  }
  
@@ -539,7 +624,7 @@ index b8ff2ff7..e343aa24 100644
  /* Multi-range check called from memory.c write paths.
   * Iterates up to 8 ranges; records if any match.
   * The always-on catch-all ring is recorded UNCONDITIONALLY first so
-@@ -14140,6 +14177,10 @@ static const CmdEntry s_commands[] = {
+@@ -14140,6 +14185,10 @@ static const CmdEntry s_commands[] = {
      { "wtrace_disarm",       handle_wtrace_del },
      { "wtrace_disarm_all",   handle_wtrace_disarm_all },
      { "wtrace_reset",        handle_wtrace_clear },
@@ -550,6 +635,22 @@ index b8ff2ff7..e343aa24 100644
      { "wtrace_ranges",       handle_wtrace_ranges },
      { "wtrace_dump",         handle_wtrace_dump },
      { "cdrom_timing_dump",   handle_cdrom_timing_dump },
+@@ -15138,8 +15187,15 @@ int debug_server_is_connected(void)
+     return s_client != SOCK_INVALID;
+ }
+ 
++int debug_server_get_input_override_p2(void)
++{
++    return s_input_override_p2;
++}
++
+ int debug_server_get_input_override(void)
+ {
++    if (s_input_override_p2 >= 0 && s_input_frames_p2 > 0 && --s_input_frames_p2 == 0)
++        s_input_override_p2 = -1;
+     if (s_input_route_active && s_input_route_index < s_input_route_count) {
+         int current = (int)s_input_route[s_input_route_index].buttons;
+         if (s_input_route_remaining > 0 && --s_input_route_remaining == 0) {
 diff --git a/runtime/src/dirty_ram_interp.c b/runtime/src/dirty_ram_interp.c
 index ef6158b7..9f0cf870 100644
 --- a/runtime/src/dirty_ram_interp.c
@@ -777,7 +878,7 @@ index a75dc88b..7584708a 100644
  }
  
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index b2857352..10e9751d 100644
+index b2857352..4f3a59ad 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
 @@ -1562,6 +1562,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
@@ -886,8 +987,21 @@ index b2857352..10e9751d 100644
              gr_set_precise_triangle(1,
                  (int32_t)((xy[0] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[1] + draw_offset_y) * 65536.0f),
-@@ -4304,10 +4364,14 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4302,12 +4362,27 @@ static void gp0_exec_shaded_textured_tri(void) {
+                 (int32_t)((xy[4] + draw_offset_x) * 65536.0f),
+                 (int32_t)((xy[5] + draw_offset_y) * 65536.0f));
              gr_set_perspective_triangle(1, q[0], q[1], q[2]);
++            float uvf[6];
++            int uvlim[4];
++            int uvk = mod_texture_packet_uv(gp0_cmd_source_addr, uvf, uvlim);
++            if (uvk)
++                gr_set_precise_uv(1, uvf, uvk >= 2 ? uvlim : NULL);
++            if (uvk == 3) {
++                float qp[6], qe[4], quv[8];
++                uint32_t qcol[4];
++                if (mod_texture_packet_quad(gp0_cmd_source_addr, qp, qe, quv, qcol))
++                    gr_set_quad_map(1, qp, qe, quv, qcol);
++            }
          }
      }
 +    if (native_depth && gr_backend() == GR_BACKEND_OPENGL)
@@ -901,7 +1015,7 @@ index b2857352..10e9751d 100644
      if (host_bank) (void)gl_renderer_select_texture_bank(0);
  }
  
-@@ -5900,11 +5964,13 @@ static void gpu_write_gp0_body(uint32_t val) {
+@@ -5900,11 +5975,13 @@ static void gpu_write_gp0_body(uint32_t val) {
      int word_count = gp0_command_word_count(opcode);
  
      if (word_count == 0) {
@@ -921,7 +1035,7 @@ index b2857352..10e9751d 100644
  
      if (word_count < 0) {
 diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
-index 44ac6bbb..1b552673 100644
+index 44ac6bbb..5c6c12ca 100644
 --- a/runtime/src/gpu_gl_renderer.c
 +++ b/runtime/src/gpu_gl_renderer.c
 @@ -533,7 +533,7 @@ static GLuint s_tex_prog = 0, s_tex_vao = 0, s_tex_vbo = 0;
@@ -929,11 +1043,24 @@ index 44ac6bbb..1b552673 100644
   * fragment shader read the noperspective varying — i.e. bit-identical to the
   * pre-feature pipeline. */
 -#define TEXV 20
-+#define TEXV 21
++#define TEXV 40
  static GLuint s_blit_prog = 0, s_blit_vao = 0, s_blit_vbo = 0;
  static GLuint s_blit_hi_prog = 0;            /* windowed hi surface blit */
  static GLint  s_uBhSrc = -1, s_uBhPass = -1, s_uBhMaskset = -1, s_uBhSrcDiv = -1;
-@@ -564,6 +564,7 @@ static GLint s_uLimits = -1;
+@@ -552,6 +552,12 @@ static int     s_pc_valid = 0;                  /* sub-pixel positions present *
+ static float   s_pc_x[3], s_pc_y[3];            /* native VRAM px, fractional  */
+ static int     s_pq_valid = 0;                  /* perspective weights present */
+ static float   s_pq[3];
++static int     s_puv_valid = 0;                 /* fractional uv present */
++static float   s_puv[6];                        /* u0 v0 u1 v1 u2 v2 */
++static int     s_puv_lim_valid = 0;             /* the whole polygon's sampled range */
++static int     s_puv_lim[4];
++static int     s_pqm_valid = 0;                 /* the quad map (gr_set_quad_map) */
++static float   s_pqm_p[6], s_pqm_e[4], s_pqm_uv[8], s_pqm_col[4];
+ 
+ /* TEX program uniforms. */
+ static GLint s_uVram = -1, s_uTpage = -1, s_uClut = -1, s_uDepth = -1;
+@@ -564,6 +570,7 @@ static GLint s_uLimits = -1;
   * bit-identical to the pre-native-wide projection. */
  static GLint s_geo_uXoff = -1, s_geo_uXhalf = -1;
  static GLint s_tex_uXoff = -1, s_tex_uXhalf = -1;
@@ -941,11 +1068,16 @@ index 44ac6bbb..1b552673 100644
  /* Native-wide 2D-backdrop x-stretch uniforms. The far 2D backdrop layer is a
   * ~4:3-width set of static prims scrolled by the draw offset; native-wide widens
   * 3D via the GTE but never these, so they leave a void in the 16:9 margins. The
-@@ -1272,11 +1273,13 @@ static const char *TEX_VS =
+@@ -1272,17 +1279,34 @@ static const char *TEX_VS =
      "layout(location=7) in vec4 a_limits;\n"
      "layout(location=8) in float a_semi;\n"
      "layout(location=9) in float a_q;   /* persp weight; 0 = affine (default) */\n"
 +    "layout(location=10) in float a_gz; /* game prim OT depth (near/z), u_zmode 2 */\n"
++    "layout(location=11) in vec4 a_qa;    /* p.xy, e3.xy */\n"
++    "layout(location=12) in vec3 a_qb;    /* e4.xy, on (1) */\n"
++    "layout(location=13) in vec4 a_quv0;  /* corners 0 1 uv */\n"
++    "layout(location=14) in vec4 a_quv1;  /* corners 2 3 uv */\n"
++    "layout(location=15) in vec4 a_qcol;  /* corners 0..3 0xBBGGRR */\n"
      "uniform float u_shift;\n"
      "uniform float u_xoff;   /* native-wide x translation (px); 0 canonical */\n"
      "uniform float u_xhalf;  /* x clip half-extent (px); 512 canonical */\n"
@@ -953,9 +1085,26 @@ index 44ac6bbb..1b552673 100644
      "uniform float u_xcenter;/* stretch centre in VRAM px; 0 canonical */\n"
 +    "uniform int u_zmode;    /* 1: native-depth batch, depth = 1 - a_q (a_q = near/z); 2: = 1 - a_gz */\n"
      "noperspective out vec2 v_uv; noperspective out vec4 v_col;\n"
++    "smooth out vec4 v_col_p; flat out int v_pcol;  /* native-depth: perspective-correct shading */\n"
      "smooth out vec2 v_uv_p;  /* perspective-correct UV (used when v_persp!=0) */\n"
++    "smooth out vec2 v_qp; flat out vec4 v_qe; flat out int v_qon;\n"
++    "flat out vec4 v_quv0, v_quv1, v_qcol;\n"
      "flat out int v_persp;\n"
-@@ -1302,7 +1305,8 @@ static const char *TEX_VS =
+     "flat out ivec2 v_tpage; flat out ivec2 v_clut; flat out int v_depth;\n"
+     "flat out int v_raw; flat out ivec4 v_limits; flat out int v_semi;\n"
+-    "void main(){ v_uv = a_uv; v_uv_p = a_uv; v_col = a_col;\n"
++    "void main(){ v_uv = a_uv; v_uv_p = a_uv; v_col = a_col; v_col_p = a_col;\n"
++    "  /* A native renderer's exact triangles split their polygons where the\n"
++    "   * camera puts them; screen-linear shading then differed across the\n"
++    "   * pieces (T-junctions), a seam that followed the camera. Shaded in\n"
++    "   * perspective, any split of a face shades it the same. */\n"
++    "  v_pcol = (u_zmode == 1 && a_q > 0.0) ? 1 : 0;\n"
++    "  v_qp = a_qa.xy; v_qe = vec4(a_qa.zw, a_qb.xy); v_qon = (a_qb.z > 0.5 && a_q > 0.0) ? 1 : 0;\n"
++    "  v_quv0 = a_quv0; v_quv1 = a_quv1; v_qcol = a_qcol;\n"
+     "  v_persp = (a_q > 0.0) ? 1 : 0;\n"
+     "  v_tpage = ivec2(a_tpage + 0.5); v_clut = ivec2(a_clut + 0.5);\n"
+     "  v_depth = int(a_depth + 0.5); v_raw = int(a_raw + 0.5);\n"
+@@ -1302,11 +1326,15 @@ static const char *TEX_VS =
      "   * a_q == 0 (feature off) w is exactly 1.0 and this is the old expression. */\n"
      "  float w = (a_q > 0.0) ? (1.0 / a_q) : 1.0;\n"
      "  vec2 ndc = vec2((xb+u_shift+u_xoff)/u_xhalf - 1.0, (a_pos.y+u_shift)/256.0 - 1.0);\n"
@@ -965,7 +1114,65 @@ index 44ac6bbb..1b552673 100644
  static const char *TEX_FS =
      "#version 330\n"
      "noperspective in vec2 v_uv; noperspective in vec4 v_col;\n"
-@@ -1859,6 +1863,22 @@ static void rebuild_mask_stencils(void) {
+     "smooth in vec2 v_uv_p; flat in int v_persp;\n"
++    "smooth in vec4 v_col_p; flat in int v_pcol;\n"
++    "smooth in vec2 v_qp; flat in vec4 v_qe; flat in int v_qon;\n"
++    "flat in vec4 v_quv0, v_quv1, v_qcol;\n"
+     "out vec4 frag; out vec4 blend_factor;\n"
+     "flat in ivec2 v_tpage;   /* texture page base, VRAM px */\n"
+     "flat in ivec2 v_clut;    /* CLUT base, VRAM px */\n"
+@@ -1344,6 +1372,27 @@ static const char *TEX_FS =
+     "  }\n"
+     "  return vram_at(v_tpage.x + u, v_tpage.y + v);\n"
+     "}\n"
++    "/* (s, t) of p in the quad (0,0) (1,0) (1,0)+f+g f: the inverse of\n"
++    " * p = s e + t f + s t g (e = (1,0)), the root of k2 t^2 + k1 t + k0 = 0\n"
++    " * nearer the quad, in the stable form (k2 -> 0: the affine case). */\n"
++    "float qx(vec2 a, vec2 b){ return a.x * b.y - a.y * b.x; }\n"
++    "float quad_s(vec2 h, vec2 f, vec2 g, float t){\n"
++    "  vec2 den = vec2(1.0, 0.0) + g * t, num = h - f * t;\n"
++    "  return abs(den.x) >= abs(den.y) ? num.x / den.x : num.y / den.y;\n"
++    "}\n"
++    "vec2 quad_st(vec2 h, vec2 f, vec2 g){\n"
++    "  vec2 e = vec2(1.0, 0.0);\n"
++    "  float k2 = qx(g, f), k1 = qx(e, f) + qx(h, g), k0 = qx(h, e);\n"
++    "  float w = sqrt(max(k1 * k1 - 4.0 * k0 * k2, 0.0));\n"
++    "  float q = -0.5 * (k1 + (k1 < 0.0 ? -w : w));\n"
++    "  float t0 = q != 0.0 ? k0 / q : 0.0;\n"
++    "  float t1 = k2 != 0.0 ? q / k2 : 1e9;\n"
++    "  vec2 a = vec2(quad_s(h, f, g, t0), t0), b = vec2(quad_s(h, f, g, t1), t1);\n"
++    "  vec2 da = abs(a - 0.5), db = abs(b - 0.5);\n"
++    "  return clamp(max(da.x, da.y) <= max(db.x, db.y) ? a : b, 0.0, 1.0);\n"
++    "}\n"
++    "vec3 qcol(float c){ int i = int(c + 0.5);\n"
++    "  return vec3(float(i & 255), float((i >> 8) & 255), float((i >> 16) & 255)) / 255.0; }\n"
+     "vec3 col5(int raw){\n"
+     "  return vec3(float(raw & 31), float((raw >> 5) & 31), float((raw >> 10) & 31)) / 31.0;\n"
+     "}\n"
+@@ -1353,6 +1402,13 @@ static const char *TEX_FS =
+     "   * AND this prim's packet carried full GTE projection provenance, so the\n"
+     "   * default is the PS1's affine (noperspective) mapping. */\n"
+     "  vec2 uv = (v_persp != 0) ? v_uv_p : v_uv;\n"
++    "  vec3 shade = (v_pcol != 0) ? v_col_p.rgb : v_col.rgb;\n"
++    "  if (v_qon != 0) {   /* the quad's bilinear map, the same however it is cut */\n"
++    "    vec2 st = quad_st(v_qp, v_qe.xy, v_qe.zw);\n"
++    "    vec4 w4 = vec4((1.0 - st.x) * (1.0 - st.y), st.x * (1.0 - st.y), st.x * st.y, (1.0 - st.x) * st.y);\n"
++    "    uv = v_quv0.xy * w4.x + v_quv0.zw * w4.y + v_quv1.xy * w4.z + v_quv1.zw * w4.w;\n"
++    "    shade = qcol(v_qcol.x) * w4.x + qcol(v_qcol.y) * w4.y + qcol(v_qcol.z) * w4.z + qcol(v_qcol.w) * w4.w;\n"
++    "  }\n"
+     "  if (u_filter == 0) {\n"
+     "    int raw = fetch_texel(int(floor(uv.x)), int(floor(uv.y)));\n"
+     "    if (raw == 0) discard;\n"
+@@ -1388,7 +1444,7 @@ static const char *TEX_FS =
+     "  }\n"
+     "  if (u_semipass == 1 && stp == 1) discard;\n"
+     "  if (u_semipass == 2 && stp == 0) discard;\n"
+-    "  if (v_raw == 0) rgb = clamp(rgb * v_col.rgb * 2.0, 0.0, 1.0);\n"
++    "  if (v_raw == 0) rgb = clamp(rgb * shade * 2.0, 0.0, 1.0);\n"
+     "  float dst_factor = 0.0;\n"
+     "  if (u_semimode == 4 && v_semi != 0 && stp != 0) {\n"
+     "    dst_factor = v_semi == 1 ? 0.5 : 1.0;\n"
+@@ -1859,6 +1915,22 @@ static void rebuild_mask_stencils(void) {
  
  /* ---- windowed high-resolution surface: mirror plumbing ------------------ */
  static int hiw_on(void) { return s_hiw && s_hiw_n > 0; }
@@ -988,7 +1195,7 @@ index 44ac6bbb..1b552673 100644
  
  /* The first tile that holds all of [x0, x1), or NULL. */
  static const HiwTile *hiw_tile_holding(int x0, int x1) {
-@@ -2454,6 +2474,28 @@ static int   s_tb_semi = -2;
+@@ -2454,6 +2526,28 @@ static int   s_tb_semi = -2;
  static int   s_tb_mask = 0, s_tb_filter = 0;
  static GLuint s_tb_bank_tex;
  static int   s_tb_twin[4] = {0, 0, 0, 0};
@@ -1017,7 +1224,7 @@ index 44ac6bbb..1b552673 100644
  static uint64_t s_batch_total = 0, s_batch_reason[7];
  
  void gl_renderer_batch_diag(uint64_t out[8]) {
-@@ -2595,6 +2637,8 @@ typedef struct {
+@@ -2595,6 +2689,8 @@ typedef struct {
      GLuint  wfbo;            /* native-wide mirror target, 0: none */
      int     wdx;             /* its x shift (wide_dx()) */
      float   wscale, wcenter; /* its backdrop stretch (wide_bd_scale) */
@@ -1026,7 +1233,7 @@ index 44ac6bbb..1b552673 100644
  } HiCmd;
  static HiCmd  *s_hq = NULL;
  static int     s_hq_n = 0, s_hq_cap = 0;
-@@ -2682,8 +2726,11 @@ static int hiw_enqueue_geo(const float *verts, int nverts, int semi, int mask,
+@@ -2682,8 +2778,11 @@ static int hiw_enqueue_geo(const float *verts, int nverts, int semi, int mask,
   * the state wide_target_begin sets (full-width scissor, the draw area's rows,
   * the S sample-grid shift) plus each entry's shift and backdrop stretch. */
  static void hiw_replay_wide(void) {
@@ -1039,7 +1246,7 @@ index 44ac6bbb..1b552673 100644
      for (int i = 0; i < s_hq_n; i++) {
          const HiCmd *c = &s_hq[i];
          if (!c->wfbo) continue;
-@@ -2693,10 +2740,10 @@ static void hiw_replay_wide(void) {
+@@ -2693,10 +2792,10 @@ static void hiw_replay_wide(void) {
              glViewport(0, 0, g_wide_w * S, VRAM_H * S);
              glEnable(GL_SCISSOR_TEST);
              p_glUseProgram(s_geo_prog);
@@ -1052,7 +1259,7 @@ index 44ac6bbb..1b552673 100644
              p_glUniform1f(s_tex_uXhalf, (float)g_wide_w / 2.0f);
              p_glUniform1i(s_uVram, 0);
              p_glActiveTexture(PSXGL_TEXTURE0);
-@@ -2715,6 +2762,25 @@ static void hiw_replay_wide(void) {
+@@ -2715,6 +2814,25 @@ static void hiw_replay_wide(void) {
                  p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
                  cur = HQ_TEX;
              }
@@ -1078,7 +1285,7 @@ index 44ac6bbb..1b552673 100644
              p_glUniform1f(s_tex_uXoff, (float)c->wdx);
              p_glUniform1f(s_tex_uXscale, c->wscale);
              p_glUniform1f(s_tex_uXcenter, c->wcenter);
-@@ -2726,6 +2792,14 @@ static void hiw_replay_wide(void) {
+@@ -2726,6 +2844,14 @@ static void hiw_replay_wide(void) {
                             s_hq_v + c->vfirst, PSXGL_STREAM_DRAW);
              tex_draw_passes_ex(c->vcount, c->semi, c->mask, c->check, 0);
          } else {
@@ -1093,7 +1300,7 @@ index 44ac6bbb..1b552673 100644
              if (cur != HQ_GEO) {
                  p_glUseProgram(s_geo_prog);
                  p_glBindVertexArray(s_geo_vao);
-@@ -2743,6 +2817,12 @@ static void hiw_replay_wide(void) {
+@@ -2743,6 +2869,12 @@ static void hiw_replay_wide(void) {
          }
      }
      if (!any) return;
@@ -1106,7 +1313,7 @@ index 44ac6bbb..1b552673 100644
      p_glUseProgram(s_geo_prog);
      p_glUniform1f(s_geo_uXscale, 1.0f);
      p_glUniform1f(s_geo_uXcenter, 0.0f);
-@@ -2757,7 +2837,7 @@ static void hiw_replay_wide(void) {
+@@ -2757,7 +2889,7 @@ static void hiw_replay_wide(void) {
   * command touches is not bound. */
  static void hiw_flush_queue(void) {
      if (s_hq_n == 0) return;
@@ -1115,7 +1322,7 @@ index 44ac6bbb..1b552673 100644
      int S = s_out_scale;
      s_hq_flushes++;
      for (int t = 0; t < s_hiw_n; t++) {
-@@ -2851,6 +2931,34 @@ static void flush_tex_batch(void) {
+@@ -2851,6 +2983,34 @@ static void flush_tex_batch(void) {
      p_glBindBuffer(PSXGL_ARRAY_BUFFER, s_tex_vbo);
      p_glBufferData(PSXGL_ARRAY_BUFFER, (ptrdiff_t)(nverts * TEXV * sizeof(float)), s_tb, PSXGL_STREAM_DRAW);
  
@@ -1150,7 +1357,7 @@ index 44ac6bbb..1b552673 100644
      tex_batch_draw_passes(nverts, semi);
  
      /* Native-wide mirror — skipped for a batch fully inside the 4:3 frame (its
-@@ -2862,7 +2970,12 @@ static void flush_tex_batch(void) {
+@@ -2862,7 +3022,12 @@ static void flush_tex_batch(void) {
      /* Windowed high-resolution surface: the same batch at S, queued and
       * replayed in one render pass at the next sync point (see s_hq), with its
       * native-wide mirror. No-op unless that mode is engaged. */
@@ -1164,7 +1371,7 @@ index 44ac6bbb..1b552673 100644
  
      if (mirror) {   /* native-wide mirror */
          int dx = wide_dx();
-@@ -2870,15 +2983,43 @@ static void flush_tex_batch(void) {
+@@ -2870,15 +3035,43 @@ static void flush_tex_batch(void) {
          gl_perf_mirror_begin();
          wide_target_begin(dx, s_tex_uXoff, s_tex_uXhalf);
          wide_set_bd_scale(s_tex_uXscale, s_tex_uXcenter);
@@ -1208,7 +1415,7 @@ index 44ac6bbb..1b552673 100644
  /* Flat / gouraud GEO batch — MotK title/char-select starfields issue ~30k/s
   * GP0(68h) 1x1 dots; each was two immediate gpu_triangle draws (BufferData +
   * DrawArrays each). Coalesce opaque/semi-uniform tris into one draw. */
-@@ -2936,6 +3077,9 @@ static void flush_flat_batch(void) {
+@@ -2936,6 +3129,9 @@ static void flush_flat_batch(void) {
      if (s_fb_n == 0) return;
      int nverts = s_fb_n, semi = s_fb_semi, mask = s_fb_mask, nl = s_fbl_n;
      GLenum fmode = s_fb_mode;
@@ -1218,7 +1425,7 @@ index 44ac6bbb..1b552673 100644
      s_fb_n = 0;
      s_fbl_n = 0;
  
-@@ -2953,7 +3097,8 @@ static void flush_flat_batch(void) {
+@@ -2953,7 +3149,8 @@ static void flush_flat_batch(void) {
      else glDrawArrays(fmode, 0, nverts);
      int mirror = g_wide_cur && !s_wide_suppress && s_ws_ablate != 1 &&
                   !(!g_ws_bd_stretch_on && mirror_flat_batch_center_only(nverts));
@@ -1228,7 +1435,7 @@ index 44ac6bbb..1b552673 100644
  
      if (mirror) {
          int dx = wide_dx();
-@@ -3123,6 +3268,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
+@@ -3123,6 +3320,7 @@ static void gpu_geometry(GLenum mode, const int *xs, const int *ys,
          if (is_line && s_hr_scale > 1) {
              draw_mode = GL_TRIANGLES; draw_verts = quad; draw_n = 6;
          }
@@ -1236,7 +1443,21 @@ index 44ac6bbb..1b552673 100644
          hr_begin(1);
          if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
          mask_stencil(s_mask_set);
-@@ -3275,7 +3421,30 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3220,6 +3418,13 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+                                   int semi, const int *lim) {
+     int lim_buf[4];
+     int uv_buf[6];
++    const int ou[3] = { us[0], us[1], us[2] }, ov[3] = { vs[0], vs[1], vs[2] };
++    if (!lim && s_puv_valid && s_puv_lim_valid) {
++        /* a split polygon's piece: the polygon's own range, so every piece
++         * clamps its filtering alike (no seam along the splits, which follow
++         * the camera); exact 3D uv, no 2D mirror compensation */
++        lim = s_puv_lim;
++    }
+     if (!lim) {
+         /* Poly path: exact sampled bounds from the ORIGINAL uvs, then the
+          * center-sampling mirror compensation (rect prims arrive with their
+@@ -3275,7 +3480,30 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
           * cannot alias a render target, keeps painter order, and still splits
           * on opaque transitions, bank/state changes, masking or subtraction. */
          int isolate = semi >= 0 &&
@@ -1268,7 +1489,7 @@ index 44ac6bbb..1b552673 100644
          int reason = -1;
          if (s_tb_n > 0) {
              if (s_tb_bank_tex != s_selected_bank_tex) reason = 0;
-@@ -3284,6 +3453,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3284,6 +3512,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
              else if (s_mask_set != s_tb_mask) reason = 2;
              else if (s_tex_filter != s_tb_filter) reason = 3;
              else if (gate != s_tb_gate) reason = 4;
@@ -1276,7 +1497,7 @@ index 44ac6bbb..1b552673 100644
              else if (twx != s_tb_twin[0] || twy != s_tb_twin[1] ||
                       tox != s_tb_twin[2] || toy != s_tb_twin[3]) reason = 5;
          }
-@@ -3295,6 +3465,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+@@ -3295,13 +3524,19 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
          if (s_tb_n == 0) {            /* opening a batch: capture its keyed state */
              s_tb_semi = batch_semi; s_tb_mask = s_mask_set; s_tb_filter = s_tex_filter; s_tb_gate = gate;
              s_tb_bank_tex = s_selected_bank_tex;
@@ -1284,15 +1505,69 @@ index 44ac6bbb..1b552673 100644
              s_tb_twin[0] = twx; s_tb_twin[1] = twy; s_tb_twin[2] = tox; s_tb_twin[3] = toy;
          }
          float *vp = &s_tb[s_tb_n * TEXV];
-@@ -3310,6 +3481,7 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
+         for (int i = 0; i < 3; i++, vp += TEXV) {
+             vp[0] = s_pc_valid ? s_pc_x[i] : (float)xs[i];
+             vp[1] = s_pc_valid ? s_pc_y[i] : (float)ys[i];
+-            vp[2] = (float)us[i];   vp[3] = (float)vs[i];
++            if (s_puv_valid) {   /* fractional uv, plus the mirror compensation */
++                vp[2] = s_puv[i * 2] + (float)(us[i] - ou[i]);
++                vp[3] = s_puv[i * 2 + 1] + (float)(vs[i] - ov[i]);
++            } else {
++                vp[2] = (float)us[i];   vp[3] = (float)vs[i];
++            }
+             vp[4] = col[i*3+0];     vp[5] = col[i*3+1];     vp[6] = col[i*3+2];   vp[7] = 1.0f;
+             vp[8]  = (float)base_x;  vp[9]  = (float)base_y;        /* a_tpage  */
+             vp[10] = (float)clut_x;  vp[11] = (float)clut_y;        /* a_clut   */
+@@ -3310,6 +3545,16 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
              vp[16] = (float)lim[2];  vp[17] = (float)lim[3];
              vp[18] = semi >= 0 ? (float)(semi + 1) : 0.0f;          /* a_semi code */
              vp[19] = s_pq_valid ? s_pq[i] : 0.0f;                   /* a_q; 0 = affine */
 +            vp[20] = gz;                                            /* a_gz (u_zmode 2) */
++            if (s_pqm_valid) {   /* a_qa a_qb a_quv0 a_quv1 a_qcol: the quad map */
++                vp[21] = s_pqm_p[i * 2]; vp[22] = s_pqm_p[i * 2 + 1];
++                memcpy(vp + 23, s_pqm_e, 4 * sizeof(float));
++                vp[27] = 1.0f;
++                memcpy(vp + 28, s_pqm_uv, 8 * sizeof(float));
++                memcpy(vp + 36, s_pqm_col, 4 * sizeof(float));
++            } else {
++                memset(vp + 21, 0, (TEXV - 21) * sizeof(float));
++            }
          }
          s_tb_n += 3;
          if (isolate) flush_tex_batch();   /* draw this semi prim alone, in submission order */
-@@ -4229,6 +4401,7 @@ static int init_gpu_raster(void) {
+@@ -3595,6 +3840,22 @@ static void glb_set_precise_triangle(int enabled,
+     }
+     sw_set_precise_triangle(enabled, x0,y0, x1,y1, x2,y2);
+ }
++static void glb_set_precise_uv(int enabled, const float uv[6], const int lim[4]) {
++    s_puv_valid = enabled && uv;
++    if (s_puv_valid) memcpy(s_puv, uv, sizeof s_puv);
++    s_puv_lim_valid = s_puv_valid && lim;
++    if (s_puv_lim_valid) memcpy(s_puv_lim, lim, sizeof s_puv_lim);
++}
++
++static void glb_set_quad_map(int enabled, const float p[6], const float e[4],
++                             const float uv[8], const uint32_t col[4]) {
++    s_pqm_valid = enabled && p && e && uv && col;
++    if (!s_pqm_valid) return;
++    memcpy(s_pqm_p, p, sizeof s_pqm_p);
++    memcpy(s_pqm_e, e, sizeof s_pqm_e);
++    memcpy(s_pqm_uv, uv, sizeof s_pqm_uv);
++    for (int i = 0; i < 4; i++) s_pqm_col[i] = (float)(col[i] & 0xFFFFFFu);   /* exact below 2^24 */
++}
+ static void glb_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
+     s_pq_valid = (enabled && q0 > 0.0f && q1 > 0.0f && q2 > 0.0f) ? 1 : 0;
+     s_pq[0] = q0; s_pq[1] = q1; s_pq[2] = q2;
+@@ -3611,7 +3872,7 @@ static void glb_set_draw_offset(int x,int y) { flush_flat_batch(); flush_tex_bat
+  * SW @ 1× for authority, then GPU @ s_out_scale for present quality. */
+ /* The sub-pixel / perspective override describes exactly one triangle; drop it
+  * once that triangle has been submitted so a later prim can never inherit it. */
+-static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; }
++static inline void precise_consumed(void) { s_pc_valid = 0; s_pq_valid = 0; s_puv_valid = 0; s_puv_lim_valid = 0; s_pqm_valid = 0; }
+ 
+ static void glb_draw_flat_triangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t col) {
+     if (s_cpu_auth_dual || !s_raster_ok)
+@@ -4229,6 +4490,7 @@ static int init_gpu_raster(void) {
      s_geo_uXoff  = p_glGetUniformLocation(s_geo_prog, "u_xoff");
      s_geo_uXhalf = p_glGetUniformLocation(s_geo_prog, "u_xhalf");
      s_tex_uXoff  = p_glGetUniformLocation(s_tex_prog, "u_xoff");
@@ -1300,14 +1575,48 @@ index 44ac6bbb..1b552673 100644
      s_tex_uXhalf = p_glGetUniformLocation(s_tex_prog, "u_xhalf");
      s_geo_uXscale  = p_glGetUniformLocation(s_geo_prog, "u_xscale");
      s_geo_uXcenter = p_glGetUniformLocation(s_geo_prog, "u_xcenter");
-@@ -4298,6 +4471,7 @@ static int init_gpu_raster(void) {
+@@ -4298,6 +4560,12 @@ static int init_gpu_raster(void) {
          p_glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, st, (void*)(14*sizeof(float))); p_glEnableVertexAttribArray(7); /* limits */
          p_glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, st, (void*)(18*sizeof(float))); p_glEnableVertexAttribArray(8); /* semi   */
          p_glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, st, (void*)(19*sizeof(float))); p_glEnableVertexAttribArray(9); /* q      */
 +        p_glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, st, (void*)(20*sizeof(float))); p_glEnableVertexAttribArray(10); /* gz */
++        p_glVertexAttribPointer(11, 4, GL_FLOAT, GL_FALSE, st, (void*)(21*sizeof(float))); p_glEnableVertexAttribArray(11); /* quad map: p, e3 */
++        p_glVertexAttribPointer(12, 3, GL_FLOAT, GL_FALSE, st, (void*)(25*sizeof(float))); p_glEnableVertexAttribArray(12); /* e4, on */
++        p_glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, st, (void*)(28*sizeof(float))); p_glEnableVertexAttribArray(13); /* uv 0 1 */
++        p_glVertexAttribPointer(14, 4, GL_FLOAT, GL_FALSE, st, (void*)(32*sizeof(float))); p_glEnableVertexAttribArray(14); /* uv 2 3 */
++        p_glVertexAttribPointer(15, 4, GL_FLOAT, GL_FALSE, st, (void*)(36*sizeof(float))); p_glEnableVertexAttribArray(15); /* colours */
      }
  
      p_glGenVertexArrays(1, &s_blit_vao);
+@@ -7003,6 +7271,8 @@ static const GpuRenderBackend GL_BACKEND = {
+     .set_texture_window = glb_set_texture_window, .set_color_modulation = glb_set_color_modulation,
+     .set_precise_triangle = glb_set_precise_triangle,
+     .set_perspective_triangle = glb_set_perspective_triangle,
++    .set_precise_uv = glb_set_precise_uv,
++    .set_quad_map = glb_set_quad_map,
+     .fill_rect = glb_fill_rect, .copy_rect = glb_copy_rect,
+     .draw_flat_triangle = glb_draw_flat_triangle, .draw_gouraud_triangle = glb_draw_gouraud_triangle,
+     .draw_textured_triangle = glb_draw_textured_triangle,
+diff --git a/runtime/src/gpu_render.c b/runtime/src/gpu_render.c
+index c833f491..bf8ce17e 100644
+--- a/runtime/src/gpu_render.c
++++ b/runtime/src/gpu_render.c
+@@ -112,6 +112,15 @@ void gr_set_perspective_triangle(int enabled, float q0, float q1, float q2) {
+     if (g_b->set_perspective_triangle)
+         g_b->set_perspective_triangle(enabled, q0, q1, q2);
+ }
++void gr_set_precise_uv(int enabled, const float uv[6], const int lim[4]) {
++    if (g_b->set_precise_uv)
++        g_b->set_precise_uv(enabled, uv, lim);
++}
++void gr_set_quad_map(int enabled, const float p[6], const float e[4],
++                     const float uv[8], const uint32_t col[4]) {
++    if (g_b->set_quad_map)
++        g_b->set_quad_map(enabled, p, e, uv, col);
++}
+ void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); }
+ void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) { g_b->copy_rect(sx, sy, dx, dy, w, h); }
+ void gr_draw_flat_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {
 diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
 index af866320..bae0cbcd 100644
 --- a/runtime/src/iso_reader.cpp
@@ -2093,7 +2402,7 @@ index 0dc8e173..a147bcdb 100644
      if (!handle) return 0;
      auto* reader = static_cast<PS1::ISOReader*>(handle);
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index a5241863..09b7b1b2 100644
+index a5241863..d3e51f81 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -1279,6 +1279,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
@@ -2191,7 +2500,47 @@ index a5241863..09b7b1b2 100644
      if (disc_override && disc_override[0]) {
          std::filesystem::path p = normalize_disc_path_for_launch(disc_override);
          return validate_disc_for_launch(p, game_id) ? p : std::filesystem::path{};
-@@ -6773,12 +6840,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -5890,6 +5957,23 @@ done:
+     freeze_heartbeat_set_paused(0);
+ }
+ 
++/* Debug-server port-2 injection: a connected digital pad holding the
++ * injected buttons, released once when the injection ends. */
++static void apply_input_override_p2_to_sio(void) {
++#ifndef PSX_NO_DEBUG_TOOLS
++    static int s_p2_active = 0;
++    const int o2 = debug_server_get_input_override_p2();
++    if (o2 >= 0) {
++        sio_set_pad_connected(1, 1);
++        sio_set_pad_state_slot(1, (uint16_t)o2);
++        s_p2_active = 1;
++    } else if (s_p2_active) {
++        sio_set_pad_state_slot(1, 0xFFFFu);
++        s_p2_active = 0;
++    }
++#endif
++}
++
+ static void sample_pad_into_sio(int override) {
+     /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
+     if (override < 0) {
+@@ -5899,6 +5983,7 @@ static void sample_pad_into_sio(int override) {
+     }
+     if (override >= 0) {
+         apply_input_override_to_sio(override);
++        apply_input_override_p2_to_sio();
+         return;
+     }
+     int n = g_offline_pad_count;
+@@ -5926,6 +6011,7 @@ static void sample_pad_into_sio(int override) {
+                                  0, 0);
+         }
+     }
++    apply_input_override_p2_to_sio();   /* over the sampled port 2 */
+ }
+ 
+ static void sample_headless_pad_into_sio(int override) {
+@@ -6773,12 +6859,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Check debug server input override. */
      int override = debug_server_get_input_override();
@@ -2206,7 +2555,7 @@ index a5241863..09b7b1b2 100644
  #endif
  
      {
-@@ -13030,6 +13098,7 @@ int main(int argc, char** argv) {
+@@ -13030,6 +13117,7 @@ int main(int argc, char** argv) {
                      gc.netplay_required_disc_fps[i];
              }
              if (!gc.discs.empty()) resolved_disc = gc.discs.front();
@@ -2214,7 +2563,7 @@ index a5241863..09b7b1b2 100644
              if (gc.runtime.has_memcard_dir)  memcard_dir   = gc.runtime.memcard_dir;
              if (gc.runtime.has_window_title) window_title  = gc.runtime.window_title;
              if (gc.runtime.has_debug_port)   debug_port    = gc.runtime.debug_port;
-@@ -14203,6 +14272,11 @@ int main(int argc, char** argv) {
+@@ -14203,6 +14291,11 @@ int main(int argc, char** argv) {
                      resolved_disc = cli_disc;
              }
              std::string rui_initial_disc = resolved_disc.string();
@@ -2226,7 +2575,7 @@ index a5241863..09b7b1b2 100644
              std::string rui_title = (game_name.empty() ? std::string("PSX") : game_name)
                                       + " - Launcher";
  
-@@ -14927,6 +15001,7 @@ int main(int argc, char** argv) {
+@@ -14927,6 +15020,7 @@ int main(int argc, char** argv) {
      if (game_config_path || disc_override_path || !resolved_disc.empty()) {
          resolved_disc = resolve_disc_for_runtime(
              resolved_disc, disc_override_path, game_id, argv[0]);
@@ -2430,7 +2779,7 @@ index d5600377..59e2642f 100644
  
  extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
 diff --git a/runtime/src/mod_texture_banks.c b/runtime/src/mod_texture_banks.c
-index d5767db1..043ad11f 100644
+index d5767db1..f28e2f19 100644
 --- a/runtime/src/mod_texture_banks.c
 +++ b/runtime/src/mod_texture_banks.c
 @@ -21,6 +21,13 @@ int mod_texture_bank_batchable(int immutable, int mask_check, int semi) {
@@ -2447,7 +2796,7 @@ index d5767db1..043ad11f 100644
  void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver) {
      resolve_bank = resolver;
  }
-@@ -75,13 +82,24 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
+@@ -75,13 +82,86 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
      return 0;
  }
  
@@ -2456,6 +2805,68 @@ index d5767db1..043ad11f 100644
 + * HTP3 = HTP2 and it starts a new view (depth clear). */
 +static int s_last_depth_mode;
 +int mod_texture_packet_depth_mode(void) { return s_last_depth_mode; }
++
++/* Optional after the precision suffix: "HTUV" and six floats, the corners'
++ * texture coordinates with their fraction (split or clipped corners of a
++ * native renderer's polygons fall between texels); "HTUL" also the whole
++ * polygon's sampled texel range (one word: lo_u lo_v hi_u hi_v); "HTUB" then
++ * the quad map (mod_texture_packet_quad). */
++int mod_texture_packet_uv(uint32_t source, float uv[6], int lim[4]) {
++    unsigned i, j;
++    uint32_t address = source & 0x1FFFFFFFu;
++    for (i = 0; i < arena_count; ++i) {
++        uint32_t magic;
++        if (arenas[i].size < 108u || address < arenas[i].begin ||
++            address - arenas[i].begin > arenas[i].size - 108u) continue;
++        magic = psx_mod_read_word(source + 76u);
++        if (magic != 0x48545556u && magic != 0x4854554Cu && magic != 0x48545542u) return 0;
++        for (j = 0; j < 6u; ++j) {
++            uint32_t bits = psx_mod_read_word(source + 80u + j * 4u);
++            float f;
++            memcpy(&f, &bits, sizeof f);
++            if (!isfinite(f) || f < -1.0f || f > 256.0f) return 0;
++            uv[j] = f;
++        }
++        if (magic != 0x48545556u) {
++            uint32_t w = psx_mod_read_word(source + 104u);
++            lim[0] = (int)(w & 0xFFu);         lim[1] = (int)((w >> 8) & 0xFFu);
++            lim[2] = (int)((w >> 16) & 0xFFu); lim[3] = (int)(w >> 24);
++            if (lim[0] > lim[2] || lim[1] > lim[3]) return 1;
++            return magic == 0x48545542u ? 3 : 2;
++        }
++        return 1;
++    }
++    return 0;
++}
++
++/* After an "HTUB" suffix: the triangle's corners in the quad's plane (six
++ * floats), e3 e4 (four), the quad corners' uv (eight) and colours (four
++ * words), source + 108 .. + 196. */
++int mod_texture_packet_quad(uint32_t source, float p[6], float e[4],
++                            float uv[8], uint32_t col[4]) {
++    unsigned i, j;
++    uint32_t address = source & 0x1FFFFFFFu;
++    for (i = 0; i < arena_count; ++i) {
++        float f[18];
++        if (arenas[i].size < 196u || address < arenas[i].begin ||
++            address - arenas[i].begin > arenas[i].size - 196u) continue;
++        if (psx_mod_read_word(source + 76u) != 0x48545542u) return 0;
++        for (j = 0; j < 18u; ++j) {
++            uint32_t bits = psx_mod_read_word(source + 108u + j * 4u);
++            memcpy(&f[j], &bits, sizeof f[j]);
++            if (!isfinite(f[j]) || fabsf(f[j]) > 1.0e6f) return 0;
++        }
++        for (j = 0; j < 8u; ++j)
++            if (f[10 + j] < -1.0f || f[10 + j] > 256.0f) return 0;
++        memcpy(p, f, 6 * sizeof(float));
++        memcpy(e, f + 6, 4 * sizeof(float));
++        memcpy(uv, f + 10, 8 * sizeof(float));
++        for (j = 0; j < 4u; ++j)
++            col[j] = psx_mod_read_word(source + 180u + j * 4u) & 0xFFFFFFu;
++        return 1;
++    }
++    return 0;
++}
 +
  int mod_texture_packet_precision(uint32_t source, float q[3], float xy[6]) {
      unsigned i, j;

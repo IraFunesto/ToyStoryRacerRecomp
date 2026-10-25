@@ -64,7 +64,10 @@
 #define MAX_ITEMS    512
 #define MAX_FACES    16384
 #define ARENA_BYTES  (4u * 1024u * 1024u - 4096u)
-#define PACKET_BYTES 80u             /* tag + GT3 (9 words) + precision suffix (10 words) */
+#define PACKET_BYTES 112u            /* tag + GT3 (9 words) + precision suffix (10 words)
+                                        + "HTUL", the corners' uv and the polygon's
+                                        sampled range (8 words) */
+#define PACKET_QM_BYTES 200u         /* + a quad's bilinear map ("HTUB", 22 words) */
 #define NEAR_Z       24.0f
 #define GUARD_X0    -1000.0f
 #define GUARD_X1     1020.0f
@@ -135,7 +138,6 @@ static uint32_t s_debug_mode_addr;
 static uint32_t s_frame, s_views[4];
 static int      s_nviews;
 extern int      g_tsr_racing;
-int tsr_ui_sky_recent(void);   /* plugin: the menus' cloud sky drawn lately */
 static float    s_draw_distance = 0.0f;   /* 0 = whole level */
 static uint32_t s_stat_tris, s_stat_frames;
 static uint64_t s_emit_us, s_emit_n;
@@ -302,6 +304,7 @@ static uint32_t s_held_list[2][MAX_SECTIONS];    /* from which section list */
 static int      s_no_sprites;   /* debug: leave sprite groups to the game */
 static int      s_no_depth;     /* debug: painter order only (HTP1, no marker) */
 static int      s_no_split;     /* debug: no depth-range subdivision */
+static int      s_no_quadmap;   /* debug +52: quads as two plain triangles */
 static int      s_no_expand;    /* debug: no crack-closing edge expansion */
 static float    s_near = NEAR_Z;   /* near clip plane (debug byte +3: value * 4) */
 static int      s_false_colour; /* debug: flat colour per section index */
@@ -454,6 +457,7 @@ typedef struct {
     float rx0, ry0, rx1, ry1;
     uint32_t marker_entry;   /* OT slot of the view's depth-clear marker */
     uint32_t bank;       /* host texture bank for the next packets (0 = VRAM) */
+    uint32_t uvlim;      /* the polygon's sampled texels lo_u lo_v hi_u hi_v (0 = none) */
     uint8_t *out;
     uint32_t out_addr, out_used, out_cap;
 } Ctx;
@@ -510,6 +514,24 @@ static inline uint32_t pack_uv(const NVert *v) {
     return (uint32_t)u | ((uint32_t)w << 8);
 }
 
+/* The quad being drawn, for its bilinear map (emit_tri's "HTUB" packets):
+ * the quad's plane with corner 0 at the origin and corner 1 at (1, 0), a
+ * vertex's coordinates ((X - o) . ax, (X - o) . ay); corner 3 at e3, corner
+ * 2 at (1, 0) + e3 + e4; its corners' uv and colours. */
+static struct {
+    int on;
+    float o[3], ax[3], ay[3];
+    float e[4];
+    float uv[8];
+    uint32_t col[4];
+} s_qm;
+
+static inline void qm_point(const NVert *v, float *px, float *py) {
+    float d[3] = { v->x - s_qm.o[0], v->y - s_qm.o[1], v->z - s_qm.o[2] };
+    *px = d[0] * s_qm.ax[0] + d[1] * s_qm.ax[1] + d[2] * s_qm.ax[2];
+    *py = d[0] * s_qm.ay[0] + d[1] * s_qm.ay[1] + d[2] * s_qm.ay[2];
+}
+
 /* Emit one triangle (camera-space vertices, already clipped). */
 /* Link only into the view's own OT (base .. farthest slot the depth table
  * can name): never let a bad index write a link anywhere else in RAM. */
@@ -526,7 +548,9 @@ static int back_facing(const NVert *a, const NVert *b, const NVert *d) {
 
 static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
                      uint32_t cmd, uint16_t clut, uint16_t tpage, uint32_t ot_entry, int depth) {
-    if (c->out_used + PACKET_BYTES > c->out_cap) return;
+    const int qm = s_qm.on && (cmd & 0xFCu) != 0x30u;
+    const uint32_t exact_bytes = qm ? PACKET_QM_BYTES : PACKET_BYTES;
+    if (c->out_used + exact_bytes > c->out_cap) return;
     if (depth == 0 && s_cull && back_facing(a, b, d)) return;
     /* Opaque native triangles are all drawn first, as one run right after
      * the view's depth clear (the next slot after the marker's): the native
@@ -584,9 +608,9 @@ static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
      * silhouettes would grow a fringe of neighbouring texels) are left alone. */
     int under = 0;
     float ux[3], uy[3];
-    if (cmd == 0x34u && !s_no_expand && !s_ztab_half && s_underlay_on && !((s_under_rule & 1u) && s_poly_depth) && c->out_used + 2u * PACKET_BYTES <= c->out_cap) {
+    float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sy[1] - sy[0]) * (sx[2] - sx[0]);
+    if (cmd == 0x34u && !s_no_expand && !s_ztab_half && s_underlay_on && !((s_under_rule & 1u) && s_poly_depth) && c->out_used + 2u * exact_bytes <= c->out_cap) {
         const float d = 0.4f;
-        float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sy[1] - sy[0]) * (sx[2] - sx[0]);
         if (fabsf(area) > 1e-4f) {
             float sgn = area > 0.0f ? 1.0f : -1.0f, nx[3], ny[3];
             for (int i = 0; i < 3; i++) {     /* outward normal of edge i -> i+1 */
@@ -623,46 +647,254 @@ static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
         s_stat_tris++; s_vb_tris++;
         return;
     }
+    /* the depth weights the renderer interpolates with (near/z, with the
+     * slot nudge, at most 1) */
+    float qa[3];
+    for (int i = 0; i < 3; i++) {
+        qa[i] = q[i] * NEAR_Z * s_qmul * slot_nudge;
+        if (qa[i] > 1.0f) qa[i] = 1.0f;
+        if (qa[i] < 1e-6f) qa[i] = 1e-6f;
+    }
+    /* The underlay's corners are points of the exact triangle's own plane,
+     * pushed out: their depth, uv, colour (and place in a quad map) carried
+     * on in perspective from the exact corners. Kept at the corners' depths,
+     * the moved corners tilted the underlay's depth: near the horizon or on
+     * a sliver that outweighed the hair it is set back, and the underlay,
+     * its texture 0.4 pixel off, covered whole faces of the exact triangles
+     * (unseen while both mapped alike, a texture shift that came and went). */
+    NVert uvert[3];
+    float uqa[3];
+    if (under) {
+        float qmin = fminf(qa[0], fminf(qa[1], qa[2]));
+        for (int j = 0; j < 3; j++) {
+            float l[3];   /* the moved corner's screen barycentrics */
+            l[0] = ((sx[1] - ux[j]) * (sy[2] - uy[j]) - (sy[1] - uy[j]) * (sx[2] - ux[j])) / area;
+            l[1] = ((sx[2] - ux[j]) * (sy[0] - uy[j]) - (sy[2] - uy[j]) * (sx[0] - ux[j])) / area;
+            l[2] = 1.0f - l[0] - l[1];
+            float w = l[0] * qa[0] + l[1] * qa[1] + l[2] * qa[2];
+            if (!(w > 0.5f * qmin)) { uvert[j] = *v[j]; uqa[j] = qa[j]; continue; }
+            float k0 = l[0] * qa[0] / w, k1 = l[1] * qa[1] / w, k2 = l[2] * qa[2] / w;
+#define EX(f) uvert[j].f = k0 * v[0]->f + k1 * v[1]->f + k2 * v[2]->f
+            EX(x); EX(y); EX(z); EX(r); EX(g); EX(b); EX(u); EX(v);
+#undef EX
+            uqa[j] = fminf(w, 1.0f);
+        }
+    }
     for (int pass = under ? 0 : 1; pass < 2; pass++) {
         const float *px = pass ? sx : ux, *py = pass ? sy : uy;
+        const NVert *pv[3] = { pass ? v[0] : &uvert[0], pass ? v[1] : &uvert[1], pass ? v[2] : &uvert[2] };
+        const float *pq = pass ? qa : uqa;
         const float qs = pass ? 1.0f : 0.997f;   /* underlay: a hair farther */
         pk = c->out + c->out_used;
         addr = c->out_addr + c->out_used;
         prev = rd32(ot_entry);
         put32(pk + 0,  (prev & 0x00FFFFFFu) | (9u << 24));
-        put32(pk + 4,  (cmd << 24) | pack_col(a));
+        put32(pk + 4,  (cmd << 24) | pack_col(pv[0]));
         put32(pk + 8,  pack_xy(px[0], py[0]));
-        put32(pk + 12, ((uint32_t)clut << 16) | pack_uv(a));
-        put32(pk + 16, pack_col(b) | ((c->bank & 0xFFu) << 24));
+        put32(pk + 12, ((uint32_t)clut << 16) | pack_uv(pv[0]));
+        put32(pk + 16, pack_col(pv[1]) | ((c->bank & 0xFFu) << 24));
         put32(pk + 20, pack_xy(px[1], py[1]));
-        put32(pk + 24, ((uint32_t)tpage << 16) | pack_uv(b));
-        put32(pk + 28, pack_col(d) | ((c->bank >> 8) << 24));
+        put32(pk + 24, ((uint32_t)tpage << 16) | pack_uv(pv[1]));
+        put32(pk + 28, pack_col(pv[2]) | ((c->bank >> 8) << 24));
         put32(pk + 32, pack_xy(px[2], py[2]));
-        put32(pk + 36, pack_uv(d));
+        put32(pk + 36, pack_uv(pv[2]));
         /* HTP2: native-depth triangle (q = near/z, absolute); HTP3 also
          * starts the view's depth buffer. */
         put32(pk + 40, s_dbg_nosuffix ? 0u : (s_no_depth || s_force_glow) ? 0x48545031u : 0x48545032u);
-        for (int i = 0; i < 3; i++) {
-            float qa = q[i] * NEAR_Z * qs * s_qmul * slot_nudge;
-            if (qa > 1.0f) qa = 1.0f;
-            if (qa < 1e-6f) qa = 1e-6f;
-            putf(pk + 44 + i * 4, qa);
-        }
+        for (int i = 0; i < 3; i++) putf(pk + 44 + i * 4, fmaxf(pq[i] * qs, 1e-6f));
         for (int i = 0; i < 3; i++) {
             putf(pk + 56 + i * 8, px[i]);
             putf(pk + 60 + i * 8, py[i]);
         }
+        /* The corners' texture coordinates with their fraction: the GT3's
+         * whole texels moved a split or clipped corner (near the camera, a
+         * texel covers dozens of pixels) by up to half a texel, and the
+         * splits follow the camera, so the floor texture slid back and forth
+         * as the camera moved. */
+        /* With the whole polygon's sampled range: the renderer clamps the
+         * bilinear filter to each triangle's own texels, so the pieces of a
+         * split polygon blended a narrow texture (a yellow floor stripe, 8
+         * texels across) differently, a seam along the splits that followed
+         * the camera. */
+        put32(pk + 80, qm ? 0x48545542u : c->uvlim ? 0x4854554Cu : 0x48545556u);   /* HTUB / HTUL / HTUV */
+        for (int i = 0; i < 3; i++) {   /* the same 0..255 range as pack_uv */
+            putf(pk + 84 + i * 8, fminf(fmaxf(pv[i]->u, 0.0f), 255.0f));
+            putf(pk + 88 + i * 8, fminf(fmaxf(pv[i]->v, 0.0f), 255.0f));
+        }
+        put32(pk + 108, c->uvlim);
+        if (qm) {   /* the quad's bilinear map (emit_quad) */
+            for (int i = 0; i < 3; i++) {
+                float px, py;
+                qm_point(pv[i], &px, &py);
+                putf(pk + 112 + i * 8, px);
+                putf(pk + 116 + i * 8, py);
+            }
+            for (int i = 0; i < 4; i++) putf(pk + 136 + i * 4, s_qm.e[i]);
+            for (int i = 0; i < 8; i++) putf(pk + 152 + i * 4, s_qm.uv[i]);
+            for (int i = 0; i < 4; i++) put32(pk + 184 + i * 4, s_qm.col[i]);
+        }
         /* the exact triangle is linked last, so the GPU draws it first */
         if (ot_ok(c, ot_entry)) psx_mod_write_word(ot_entry, (prev & 0xFF000000u) | (addr & 0x00FFFFFFu));
-        c->out_used += PACKET_BYTES;
+        c->out_used += exact_bytes;
         s_stat_tris++; s_vb_tris++;
     }
+}
+
+/* The texels a polygon samples, packed lo_u lo_v hi_u hi_v for the packets'
+ * suffix: its corners' whole range, less the last texel on each axis for a
+ * billboard (its uv end is exclusive: the next cel of the sheet). */
+static uint32_t uv_range(const NVert *v, int n, int exclusive_end) {
+    float u0 = 255.0f, v0 = 255.0f, u1 = 0.0f, v1 = 0.0f;
+    for (int k = 0; k < n; k++) {
+        u0 = fminf(u0, v[k].u); u1 = fmaxf(u1, v[k].u);
+        v0 = fminf(v0, v[k].v); v1 = fmaxf(v1, v[k].v);
+    }
+    int lu = (int)floorf(u0), lv = (int)floorf(v0), hu = (int)ceilf(u1), hv = (int)ceilf(v1);
+    if (exclusive_end) { if (hu > lu) hu--; if (hv > lv) hv--; }
+    if (lu < 0) lu = 0; if (lv < 0) lv = 0; if (hu > 255) hu = 255; if (hv > 255) hv = 255;
+    return (uint32_t)lu | ((uint32_t)lv << 8) | ((uint32_t)hu << 16) | ((uint32_t)hv << 24);
 }
 
 static inline void lerp_vert(NVert *o, const NVert *a, const NVert *b, float t) {
     o->x = a->x + (b->x - a->x) * t; o->y = a->y + (b->y - a->y) * t; o->z = a->z + (b->z - a->z) * t;
     o->r = a->r + (b->r - a->r) * t; o->g = a->g + (b->g - a->g) * t; o->b = a->b + (b->b - a->b) * t;
     o->u = a->u + (b->u - a->u) * t; o->v = a->v + (b->v - a->v) * t;
+}
+
+static void emit_poly(Ctx *c, const NVert *poly, int n, uint32_t cmd, uint16_t clut,
+                      uint16_t tpage, uint32_t zt, int depth);
+
+/* How far a quad's texture and shading are from what two triangles can draw:
+ * the affine map through corners 0 1 3 sends corner 2's position to some uv
+ * and colour; the distance to its own (texels, colour levels). Zero for a
+ * parallelogram mapped to a parallelogram. */
+static void quad_nonaffine(const NVert *q, float *uv_err, float *col_err) {
+    /* corner 2 as P0 + a (P1 - P0) + b (P3 - P0), least squares in 3D */
+    float e1[3] = { q[1].x - q[0].x, q[1].y - q[0].y, q[1].z - q[0].z };
+    float e2[3] = { q[3].x - q[0].x, q[3].y - q[0].y, q[3].z - q[0].z };
+    float d[3]  = { q[2].x - q[0].x, q[2].y - q[0].y, q[2].z - q[0].z };
+    float a11 = e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2];
+    float a12 = e1[0] * e2[0] + e1[1] * e2[1] + e1[2] * e2[2];
+    float a22 = e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2];
+    float b1 = e1[0] * d[0] + e1[1] * d[1] + e1[2] * d[2];
+    float b2 = e2[0] * d[0] + e2[1] * d[1] + e2[2] * d[2];
+    float det = a11 * a22 - a12 * a12;
+    if (fabsf(det) < 1e-12f) { *uv_err = *col_err = 0.0f; return; }
+    float a = (b1 * a22 - b2 * a12) / det, bb = (a11 * b2 - a12 * b1) / det;
+    float pu = q[0].u + a * (q[1].u - q[0].u) + bb * (q[3].u - q[0].u);
+    float pv = q[0].v + a * (q[1].v - q[0].v) + bb * (q[3].v - q[0].v);
+    *uv_err = fmaxf(fabsf(pu - q[2].u), fabsf(pv - q[2].v));
+    float ce = 0.0f;
+    const float c0[3] = { q[0].r, q[0].g, q[0].b }, c1[3] = { q[1].r, q[1].g, q[1].b };
+    const float c2[3] = { q[2].r, q[2].g, q[2].b }, c3[3] = { q[3].r, q[3].g, q[3].b };
+    for (int i = 0; i < 3; i++) ce = fmaxf(ce, fabsf(c0[i] + a * (c1[i] - c0[i]) + bb * (c3[i] - c0[i]) - c2[i]));
+    *col_err = ce;
+}
+
+static void bilerp_vert(NVert *o, const NVert *q, float s, float t) {
+    float w0 = (1.0f - s) * (1.0f - t), w1 = s * (1.0f - t), w2 = s * t, w3 = (1.0f - s) * t;
+#define BL(f) o->f = w0 * q[0].f + w1 * q[1].f + w2 * q[2].f + w3 * q[3].f
+    BL(x); BL(y); BL(z); BL(r); BL(g); BL(b); BL(u); BL(v);
+#undef BL
+}
+
+/* s_qm for a quad: its plane is the one across both diagonals (a bent quad's
+ * two triangles both project onto it), and it must be convex there. */
+static int quad_frame(const NVert *q) {
+    float e1[3] = { q[1].x - q[0].x, q[1].y - q[0].y, q[1].z - q[0].z };
+    float d1[3] = { q[2].x - q[0].x, q[2].y - q[0].y, q[2].z - q[0].z };
+    float d2[3] = { q[3].x - q[1].x, q[3].y - q[1].y, q[3].z - q[1].z };
+    float n[3] = { d1[1] * d2[2] - d1[2] * d2[1], d1[2] * d2[0] - d1[0] * d2[2], d1[0] * d2[1] - d1[1] * d2[0] };
+    float l1 = sqrtf(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    float ln = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (l1 < 1e-4f || ln < 1e-8f) return 0;
+    float ax[3] = { e1[0] / l1, e1[1] / l1, e1[2] / l1 };
+    float ay[3] = { n[1] * ax[2] - n[2] * ax[1], n[2] * ax[0] - n[0] * ax[2], n[0] * ax[1] - n[1] * ax[0] };
+    float ly = sqrtf(ay[0] * ay[0] + ay[1] * ay[1] + ay[2] * ay[2]);
+    if (ly < 1e-8f) return 0;
+    s_qm.o[0] = q[0].x; s_qm.o[1] = q[0].y; s_qm.o[2] = q[0].z;
+    for (int k = 0; k < 3; k++) {
+        s_qm.ax[k] = ax[k] / l1;          /* in units of the edge 0-1 */
+        s_qm.ay[k] = ay[k] / (ly * l1);
+    }
+    float c[4][2] = { { 0.0f, 0.0f }, { 1.0f, 0.0f } };
+    qm_point(&q[2], &c[2][0], &c[2][1]);
+    qm_point(&q[3], &c[3][0], &c[3][1]);
+    int pos = 0, neg = 0;
+    for (int k = 0; k < 4; k++) {
+        const float *a = c[k], *b = c[(k + 1) & 3], *d = c[(k + 2) & 3];
+        float x = (b[0] - a[0]) * (d[1] - b[1]) - (b[1] - a[1]) * (d[0] - b[0]);
+        if (x > 1e-4f) pos++; else if (x < -1e-4f) neg++;
+    }
+    if (pos != 4 && neg != 4) return 0;
+    s_qm.e[0] = c[3][0];                 s_qm.e[1] = c[3][1];
+    s_qm.e[2] = c[2][0] - 1.0f - c[3][0]; s_qm.e[3] = c[2][1] - c[3][1];
+    for (int k = 0; k < 4; k++) {
+        s_qm.uv[k * 2] = fminf(fmaxf(q[k].u, 0.0f), 255.0f);
+        s_qm.uv[k * 2 + 1] = fminf(fmaxf(q[k].v, 0.0f), 255.0f);
+        s_qm.col[k] = pack_col(&q[k]);
+    }
+    return 1;
+}
+
+/*
+ * A quad is drawn the same way wherever the camera is. The game subdivides
+ * near quads at their edge midpoints, which maps texture and shading
+ * bilinearly (a straight texture line along the quad stays straight). Here
+ * the quad was drawn as two triangles, or a fan around its centre when big
+ * on screen, or clipped at the near plane and fanned from a corner, or split
+ * into quarters for depth: each maps a non-parallelogram quad differently,
+ * so as the camera moved the choice changed and thin lines of the texture
+ * folded at moving places (the yellow-stripe seam, the duct floor's
+ * zig-zag). Now a quad is always the two triangles on the game's diagonal
+ * (clipping and depth splits only ever cut triangles), and a textured quad
+ * that two triangles cannot map exactly carries its whole bilinear map: the
+ * renderer works out each pixel's place in the quad and its uv and colour
+ * from the four corners, like the game's subdivision, however the quad is
+ * cut. Untextured quads with very uneven shading still get a 2 x 2 grid.
+ * All pieces keep the quad's own OT slot.
+ */
+static void emit_quad(Ctx *c, const NVert *q, uint32_t cmd, uint16_t clut, uint16_t tpage,
+                      uint32_t zt, int depth) {
+    float uv_err, col_err;
+    quad_nonaffine(q, &uv_err, &col_err);
+    int textured = (cmd & 0x04u) != 0u;
+    int cells = (!textured && col_err > 16.0f && !s_no_split) ? 2 : 1;
+    int map = textured && !s_no_quadmap && (uv_err > 0.02f || col_err > 0.5f) && quad_frame(q);
+    /* the quad's slot (the game sorts the whole quad by its average) */
+    float zsum = 0.0f;
+    for (int k = 0; k < 4; k++) zsum += q[k].z > s_near ? q[k].z : s_near;
+    int otz = s_zsf3 > 0.0f ? (int)(zsum * s_zsf4) : (int)(zsum * 0.0625f);
+    if (otz < 1) otz = 1;
+    if ((uint32_t)otz >= c->zfar) {
+        if (s_far_reject) return;
+        otz = (int)c->zfar - 1;
+    }
+    uint32_t slot = c->ot + rd16(zt + (uint32_t)otz * (s_ztab_half ? 2u : 4u));
+    if (slot == c->marker_entry && slot >= c->ot + 4u) slot -= 4u;
+    uint32_t saved = s_fan_ot;
+    if (!s_fan_ot) s_fan_ot = slot;
+    s_qm.on = map;
+    float inv = 1.0f / (float)cells;
+    for (int j = 0; j < cells; j++)
+        for (int i = 0; i < cells; i++) {
+            NVert g[4], t[3];
+            bilerp_vert(&g[0], q, (float)i * inv, (float)j * inv);
+            bilerp_vert(&g[1], q, (float)(i + 1) * inv, (float)j * inv);
+            bilerp_vert(&g[2], q, (float)(i + 1) * inv, (float)(j + 1) * inv);
+            bilerp_vert(&g[3], q, (float)i * inv, (float)(j + 1) * inv);
+            if (i == 0 && j == 0) g[0] = q[0];
+            if (i == cells - 1 && j == 0) g[1] = q[1];
+            if (i == cells - 1 && j == cells - 1) g[2] = q[2];
+            if (i == 0 && j == cells - 1) g[3] = q[3];
+            /* the game's diagonal: corners 0 1 3 and 1 2 3 */
+            t[0] = g[0]; t[1] = g[1]; t[2] = g[3];
+            emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
+            t[0] = g[1]; t[1] = g[2]; t[2] = g[3];
+            emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
+        }
+    s_qm.on = 0;
+    s_fan_ot = saved;
 }
 
 /*
@@ -680,6 +912,12 @@ static inline void lerp_vert(NVert *o, const NVert *a, const NVert *b, float t) 
  */
 static void emit_poly(Ctx *c, const NVert *poly, int n, uint32_t cmd, uint16_t clut,
                       uint16_t tpage, uint32_t zt, int depth) {
+    if (n == 4) {
+        int any = 0;
+        for (int k = 0; k < 4; k++) if (poly[k].z >= s_near) any = 1;
+        if (any) emit_quad(c, poly, cmd, clut, tpage, zt, depth);
+        return;
+    }
     float zmin = 1e30f, zmax = -1e30f, zsum = 0.0f;
     for (int k = 0; k < n; k++) {
         if (poly[k].z < zmin) zmin = poly[k].z;
@@ -701,85 +939,24 @@ static void emit_poly(Ctx *c, const NVert *poly, int n, uint32_t cmd, uint16_t c
         }
         extent = (sxmax - sxmin) + (symax - symin);
     }
-    /* Gouraud quads: the PS1 game subdivides near quads at edge midpoints,
-     * which shades them bilinearly; one quad drawn as two triangles shows a
-     * light or dark wedge along its diagonal instead. Split quads whose
-     * vertex colours differ while they are big on screen. */
-    int shade_split = 0;
-    if (n == 4 && depth < 4 && zmin > s_near) {
-        float cmin[3] = { 1e9f, 1e9f, 1e9f }, cmax[3] = { -1e9f, -1e9f, -1e9f };
-        for (int k = 0; k < 4; k++) {
-            const float cv[3] = { poly[k].r, poly[k].g, poly[k].b };
-            for (int j = 0; j < 3; j++) {
-                if (cv[j] < cmin[j]) cmin[j] = cv[j];
-                if (cv[j] > cmax[j]) cmax[j] = cv[j];
-            }
-        }
-        float crange = 0.0f;
-        for (int j = 0; j < 3; j++) if (cmax[j] - cmin[j] > crange) crange = cmax[j] - cmin[j];
-        shade_split = crange >= 12.0f && extent > 48.0f;
-    }
-    if (s_split_rule & 1u) shade_split = 0;
     if ((s_split_rule & 2u) && extent >= 1e9f) extent = 0.0f;
     if ((s_split_rule & 4u) && extent < 1e9f) extent = 0.0f;
     /* (opaque faces drawn early need no depth order at all) */
     int depth_split = zmax - zmin > 64.0f && zmax > znear * 1.3f && extent > 64.0f &&
                       (cmd != 0x36u || extent >= 1e9f) &&
                       !(s_early_opaque && cmd == 0x34u && !s_force_glow && !s_no_depth);
-    if (!s_no_split && shade_split && !(depth_split && depth < s_split_max)) {
-        /* Gouraud wedge fix: four triangles around the centre (average of
-         * the corners = the bilinear centre). Recursive midpoint splitting
-         * looked the same but cost hundreds of pieces per big floor tile
-         * (kitchen, 2P slowdown). */
-        NVert ctr = poly[0], t[3];
-        lerp_vert(&ctr, &poly[0], &poly[2], 0.5f);
-        NVert m13;
-        lerp_vert(&m13, &poly[1], &poly[3], 0.5f);
-        lerp_vert(&ctr, &ctr, &m13, 0.5f);
-        /* all four in the quad's own OT slot, so they stay one run of
-         * packets: pieces in neighbouring slots interleave with the floor's
-         * blended reflection layer and every opaque/blended switch costs the
-         * renderer a framebuffer copy (kitchen: GPU 79% -> see notes) */
-        int otz = s_zsf3 > 0.0f ? (int)(zsum * s_zsf4) : (int)(zsum * 0.0625f);
-        if (otz < 1) otz = 1;
-        if ((uint32_t)otz >= c->zfar) otz = (int)c->zfar - 1;
-        uint32_t fan_ot = c->ot + rd16(zt + (uint32_t)otz * (s_ztab_half ? 2u : 4u));
-        if (fan_ot == c->marker_entry && fan_ot >= c->ot + 4u) fan_ot -= 4u;
-        for (int k = 0; k < 4; k++) {
-            t[0] = poly[k]; t[1] = poly[(k + 1) & 3]; t[2] = ctr;
-            s_fan_ot = fan_ot;
-            emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
-            s_fan_ot = 0;
-        }
-        return;
-    }
     if (!s_no_split && depth < s_split_max && depth_split) {
-        NVert m[5];
-        if (n == 4) {
-            lerp_vert(&m[0], &poly[0], &poly[1], 0.5f);
-            lerp_vert(&m[1], &poly[1], &poly[2], 0.5f);
-            lerp_vert(&m[2], &poly[2], &poly[3], 0.5f);
-            lerp_vert(&m[3], &poly[3], &poly[0], 0.5f);
-            lerp_vert(&m[4], &m[0], &m[2], 0.5f);
-            NVert q[4];
-            q[0] = poly[0]; q[1] = m[0]; q[2] = m[4]; q[3] = m[3];
-            emit_poly(c, q, 4, cmd, clut, tpage, zt, depth + 1);
-            q[0] = m[0]; q[1] = poly[1]; q[2] = m[1]; q[3] = m[4];
-            emit_poly(c, q, 4, cmd, clut, tpage, zt, depth + 1);
-            q[0] = m[4]; q[1] = m[1]; q[2] = poly[2]; q[3] = m[2];
-            emit_poly(c, q, 4, cmd, clut, tpage, zt, depth + 1);
-            q[0] = m[3]; q[1] = m[4]; q[2] = m[2]; q[3] = poly[3];
-            emit_poly(c, q, 4, cmd, clut, tpage, zt, depth + 1);
-        } else {
-            lerp_vert(&m[0], &poly[0], &poly[1], 0.5f);
-            lerp_vert(&m[1], &poly[1], &poly[2], 0.5f);
-            lerp_vert(&m[2], &poly[2], &poly[0], 0.5f);
-            NVert t[3];
-            t[0] = poly[0]; t[1] = m[0]; t[2] = m[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
-            t[0] = m[0]; t[1] = poly[1]; t[2] = m[1]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
-            t[0] = m[2]; t[1] = m[1]; t[2] = poly[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
-            t[0] = m[0]; t[1] = m[1]; t[2] = m[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
-        }
+        /* triangles only (quads were cut on the game's diagonal): the
+         * midpoints keep the mapping */
+        NVert m[3];
+        lerp_vert(&m[0], &poly[0], &poly[1], 0.5f);
+        lerp_vert(&m[1], &poly[1], &poly[2], 0.5f);
+        lerp_vert(&m[2], &poly[2], &poly[0], 0.5f);
+        NVert t[3];
+        t[0] = poly[0]; t[1] = m[0]; t[2] = m[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
+        t[0] = m[0]; t[1] = poly[1]; t[2] = m[1]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
+        t[0] = m[2]; t[1] = m[1]; t[2] = poly[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
+        t[0] = m[0]; t[1] = m[1]; t[2] = m[2]; emit_poly(c, t, 3, cmd, clut, tpage, zt, depth + 1);
         return;
     }
     s_poly_depth = depth;
@@ -814,15 +991,6 @@ static void emit_poly(Ctx *c, const NVert *poly, int n, uint32_t cmd, uint16_t c
         n = clip_poly(b2, n, b1, 3); if (n < 3) return;
         n = clip_poly(b1, n, b2, 4); if (n < 3) return;
         memcpy(b1, b2, sizeof(NVert) * (size_t)n);
-    }
-    if (n == 4 && !need) {
-        /* Split a quad along the diagonal the PS1 uses (its vertex order is
-         * p1 p2 p4 p3, triangles p1 p2 p4 and p2 p4 p3): with differing
-         * vertex colours the other diagonal shades a visibly different
-         * crease into walls. */
-        emit_tri(c, &b1[0], &b1[1], &b1[3], cmd, clut, tpage, ot_entry, 0);
-        emit_tri(c, &b1[1], &b1[2], &b1[3], cmd, clut, tpage, ot_entry, 0);
-        return;
     }
     for (int k = 1; k + 1 < n; k++)
         emit_tri(c, &b1[0], &b1[k], &b1[k + 1], cmd, clut, tpage, ot_entry, 0);
@@ -1022,7 +1190,9 @@ static void emit_face(Ctx *c, NVert *poly, int n, uint8_t flags, uint8_t texmap,
             poly[k].u = poly[k].v = 0.0f;   /* inside the 16x16 bank */
         }
     }
+    c->uvlim = textured ? uv_range(poly, n, 0) : 0u;
     emit_poly(c, poly, n, cmd, clut, tpage, zt, 0);
+    c->uvlim = 0u;
 }
 
 /* Debug: encode an index in a flat colour, 3 bits per channel (16 + 32 * k),
@@ -1372,15 +1542,378 @@ static void set_ot_depth(Ctx *c) {
     psx_mod_add_ot_depth_base(c->ot);
 }
 
+/* A view already started: its early opaque run goes right after the marker
+ * where the marker was linked, not where this call's far limit puts it. The
+ * two-player demos lower the far limit for the scenery (4000) and raise it
+ * again for the karts (5000): the karts' and wheels' run landed before the
+ * depth clear, under the scenery. */
+static void use_view_marker(Ctx *c, int slot) {
+    if (slot >= 0 && slot < 4 && s_view_marker[slot]) c->marker_entry = s_view_marker_entry[slot];
+}
+
 /* Start a view's native drawing if nothing native has been drawn into this
  * OT yet this frame (the depth-clear marker and the OT depth table). The
  * scenery normally does it; in menus and other scenes without native
  * scenery the models or sprites are the first native packets. */
 static void view_begin(Ctx *c) {
     int slot;
-    if (!view_start_needed(c->ot, &slot)) return;
+    if (!view_start_needed(c->ot, &slot)) { use_view_marker(c, slot); return; }
     emit_view_start_marker(c, slot);
     set_ot_depth(c);
+}
+
+/* ---- smooth camera turns ---------------------------------------------------
+ *
+ * The game eases its camera's integer angles towards their targets
+ * (0x8006DF14: angle += (target - angle) >> k, 4096 units a turn): a steady
+ * turn advances +2 +2 +3 units a frame, and a slowly moving target is
+ * followed in pauses and one-unit steps (a tenth of a degree). Invisible at
+ * 1x; in a 32:9 view at 4x a unit moves the screen edges by about six
+ * pixels, so the floor shook while the camera swayed (a knocked-out kart's
+ * camera does it on its own). The native geometry is drawn with the angles
+ * tracked by an alpha-beta filter instead (an even 2.33 units a frame, a
+ * slow drift): the camera's own matrix is rebuilt as S Rs (S the view's X
+ * scale, Rs the rotation Rz(c) Rx(a) Ry(-b) of the filtered angles; the
+ * game's is S Rg from its angles at +96/+98/+100), and the models' matrices
+ * are premultiplied by K = S Rs Rg^-1 S^-1. The filtered angles stay within
+ * four units of the game's (whose HUD markers sit over the karts); a jump of
+ * more than 64 (a camera cut) is taken at once. Debug +50 = 1: off.
+ */
+#define CAMERA_PTR 0x800A9EC8u   /* the camera the current view was built from */
+typedef struct {
+    uint32_t cam, frame;
+    int16_t game[3];      /* the game's angles this frame */
+    float eased[3], vel[3], speed[3];
+    float sh[2];          /* pitch, yaw worked out again without rounding */
+    float shc[2];         /* slow pull of sh towards the game's own angles */
+    int sh_ok;            /* sh follows this camera (tsr_native_camera_update) */
+    float sx;             /* the X row's scale (the widescreen factor) */
+    int exact;            /* m holds the camera matrix of the eased angles */
+    float k[9], m[9];     /* this frame's correction and exact matrix */
+    int16_t g16[9];       /* the game's camera matrix this frame */
+} CamEase;
+static CamEase s_ease[4];
+static float s_camk[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+static float s_camm[9];
+static int16_t s_camg[9];
+static int s_cam_exact;
+
+static void rot_camera(float R[9], const float ang[3]) {
+    const float u = 6.28318530718f / 4096.0f;
+    float ca = cosf(ang[0] * u), sa = sinf(ang[0] * u);
+    float cb = cosf(-ang[1] * u), sb = sinf(-ang[1] * u);
+    float cc = cosf(ang[2] * u), sc = sinf(ang[2] * u);
+    /* Rz(c) Rx(a) Ry(-b): the roll (the pre-race flight banks in the
+     * curves) comes first; fitted on the game's matrices to 0.0007 */
+    const float X[9] = { 1, 0, 0, 0, ca, -sa, 0, sa, ca };
+    const float Y[9] = { cb, 0, sb, 0, 1, 0, -sb, 0, cb };
+    const float Z[9] = { cc, -sc, 0, sc, cc, 0, 0, 0, 1 };
+    float T[9];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            T[i * 3 + j] = X[i * 3] * Y[j] + X[i * 3 + 1] * Y[3 + j] + X[i * 3 + 2] * Y[6 + j];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            R[i * 3 + j] = Z[i * 3] * T[j] + Z[i * 3 + 1] * T[3 + j] + Z[i * 3 + 2] * T[6 + j];
+}
+
+static float wrap_units(float d) {
+    while (d >= 2048.0f) d -= 4096.0f;
+    while (d < -2048.0f) d += 4096.0f;
+    return d;
+}
+
+/* The current view's correction (s_camk) and exact matrix (s_camm), worked
+ * out once per frame and camera from the camera's own copy of its matrix
+ * (the kart renderers reuse the view+96 scratch slot for theirs). */
+static void camera_ease_update(void) {
+    static const float I[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    uint32_t cam = rd32(CAMERA_PTR);
+    s_cam_exact = 0;
+    if ((s_debug_mode_addr && rd8(s_debug_mode_addr + 50u) == 1u) ||
+        (cam & 0xFF800000u) != 0x80000000u) {
+        memcpy(s_camk, I, sizeof s_camk);
+        return;
+    }
+    CamEase *e = NULL;
+    for (int i = 0; i < 4 && !e; i++) if (s_ease[i].cam == cam) e = &s_ease[i];
+    if (!e) {
+        e = &s_ease[0];
+        for (int i = 1; i < 4; i++) if (s_ease[i].frame < e->frame) e = &s_ease[i];
+        memset(e, 0, sizeof *e);
+        e->cam = cam;
+        for (int k = 0; k < 3; k++) {
+            e->game[k] = (int16_t)rd16(cam + 96u + (uint32_t)k * 2u);
+            e->eased[k] = (float)e->game[k];
+        }
+        e->frame = s_frame - 1u;
+    }
+    if (e->frame != s_frame) {
+        e->frame = s_frame;
+        /* alpha-beta tracking of each angle: a steady turn read as +2 +2 +3
+         * units a frame becomes 2.33, a pause before a one-unit step a slow
+         * drift. The velocity estimate decays (x 0.9 a frame): without it a
+         * lone one-unit step overshot by 0.4 unit and swung back, a slow
+         * wobble at the screen edges. A fast turn is followed as the game
+         * has it, blended in from 3 to 8 units a frame (the whole units are
+         * nothing against that motion): the filter lagged a quick swing,
+         * hit its limit and was snapped back to the game's angle, a jolt of
+         * several units in one frame. Tuned on recorded sways (yaw and
+         * pitch) and simulated fast swings: slow jerk 0.65 -> 0.11 units a
+         * frame, fast ones as the game's, overshoot 0.14. */
+        for (int k = 0; k < 3; k++) {
+            int16_t g = (int16_t)rd16(cam + 96u + (uint32_t)k * 2u);
+            float step = wrap_units((float)(g - e->game[k]));
+            e->game[k] = g;
+            if (k < 2 && e->sh_ok) {   /* the camera's own angles, unrounded */
+                float s = e->sh[k] + e->shc[k];
+                if (s < 0.0f) s += 4096.0f;
+                if (s >= 4096.0f) s -= 4096.0f;
+                e->eased[k] = s;
+                e->vel[k] = step;
+                e->speed[k] = fabsf(step);
+                continue;
+            }
+            if (fabsf(step) > 64.0f) {   /* a camera cut */
+                e->eased[k] = (float)g;
+                e->vel[k] = e->speed[k] = 0.0f;
+                continue;
+            }
+            e->speed[k] += 0.2f * (fabsf(step) - e->speed[k]);
+            float p = e->eased[k] + e->vel[k];
+            float res = wrap_units((float)g - p);
+            float s = p + 0.2f * res;
+            e->vel[k] = (e->vel[k] + 0.05f * res) * 0.9f;
+            float d = wrap_units(s - (float)g);
+            if (d > 4.0f) s = (float)g + 4.0f;
+            if (d < -4.0f) s = (float)g - 4.0f;
+            float w = (e->speed[k] - 3.0f) / 5.0f;
+            if (w > 0.0f) {
+                if (w >= 1.0f) { w = 1.0f; e->vel[k] = step; }
+                s += w * wrap_units((float)g - s);
+            }
+            if (s < 0.0f) s += 4096.0f;
+            if (s >= 4096.0f) s -= 4096.0f;
+            e->eased[k] = s;
+        }
+        /* the camera's matrix (+0, as copied to view+96) must be the game's
+         * rotation of these angles, X row scaled: anything else (menu
+         * cameras) is left alone */
+        float G[9], Rg[9], Rs[9], ga[3];
+        for (int i = 0; i < 9; i++) {
+            e->g16[i] = (int16_t)rd16(cam + (uint32_t)i * 2u);
+            G[i] = e->g16[i] / 4096.0f;
+        }
+        for (int k = 0; k < 3; k++) ga[k] = (float)e->game[k];
+        rot_camera(Rg, ga);
+        float sx = sqrtf(G[0] * G[0] + G[1] * G[1] + G[2] * G[2]);
+        /* the row's whole-number entries make its length wobble by a few
+         * 1/10000: keep the scale unless it really changed */
+        if (fabsf(sx - e->sx) > 0.002f) e->sx = sx;
+        int ok = e->sx > 0.5f && e->sx < 4.0f;
+        for (int i = 0; i < 9 && ok; i++)
+            if (fabsf(G[i] - (i < 3 ? e->sx : 1.0f) * Rg[i]) > 0.01f) ok = 0;
+        e->exact = ok;
+        if (!ok) {
+            memcpy(e->k, I, sizeof e->k);
+        } else {
+            rot_camera(Rs, e->eased);
+            const float s[3] = { e->sx, 1.0f, 1.0f };
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++) {
+                    /* (Rs Rg^T)_ij */
+                    float v = Rs[i * 3] * Rg[j * 3] + Rs[i * 3 + 1] * Rg[j * 3 + 1] + Rs[i * 3 + 2] * Rg[j * 3 + 2];
+                    e->k[i * 3 + j] = s[i] * v / s[j];
+                    e->m[i * 3 + j] = s[i] * Rs[i * 3 + j];
+                }
+        }
+    }
+    memcpy(s_camk, e->k, sizeof s_camk);
+    memcpy(s_camm, e->m, sizeof s_camm);
+    memcpy(s_camg, e->g16, sizeof s_camg);
+    s_cam_exact = e->exact;
+}
+
+/* M (3 x 3, row-major, if any) = K M; t (if any) = K t */
+static void camera_ease_apply(float M[9], float t[3]) {
+    if (M) {
+        float R[9];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                R[i * 3 + j] = s_camk[i * 3] * M[j] + s_camk[i * 3 + 1] * M[3 + j] + s_camk[i * 3 + 2] * M[6 + j];
+        memcpy(M, R, sizeof R);
+    }
+    if (t) {
+        float x = t[0], y = t[1], z = t[2];
+        for (int i = 0; i < 3; i++) t[i] = s_camk[i * 3] * x + s_camk[i * 3 + 1] * y + s_camk[i * 3 + 2] * z;
+    }
+}
+
+/* A matrix the game took from its camera (int16 entries as stored, / 4096 in
+ * M): the camera matrix rebuilt from the eased angles when it is that one,
+ * without the game's whole-number entries (their rounding shook the edges of
+ * a wide view by a fraction of a pixel as the angles changed); else K M. */
+static void camera_matrix(float M[9], const int16_t raw[9]) {
+    if (s_cam_exact && raw && memcmp(raw, s_camg, sizeof s_camg) == 0) {
+        memcpy(M, s_camm, sizeof s_camm);
+        return;
+    }
+    camera_ease_apply(M, NULL);
+}
+
+static float view_row_f(const int32_t d[3], const int16_t row[3]);
+
+/* An object's camera-space position from its offset d to the camera
+ * (high-precision units, row = the view+96 rows), in the object renderers'
+ * units (d . row >> 17). */
+static void camera_offset(const int32_t d[3], const int16_t row[9], float tr[3]) {
+    if (s_cam_exact) {
+        for (int i = 0; i < 3; i++)
+            tr[i] = (float)(((double)s_camm[i * 3] * d[0] + (double)s_camm[i * 3 + 1] * d[1] +
+                             (double)s_camm[i * 3 + 2] * d[2]) / 32.0);
+        return;
+    }
+    tr[0] = view_row_f(d, row);
+    tr[1] = view_row_f(d, row + 3);
+    tr[2] = view_row_f(d, row + 6);
+    camera_ease_apply(NULL, tr);
+}
+
+/* The race camera's angles worked out again without rounding. 0x8006B394
+ * aims the camera at a point ahead of the kart (on its stack at +48/+52/+56,
+ * the camera at struct +68/+72/+76): the targets are ratan2 of the
+ * differences >> 7 (two scenery units: the target moved in steps of up to
+ * a degree), pitch atan2(dy, |dx dz|), yaw atan2(dx, dz), plus the camera
+ * mode's offsets (+126; races use 1, none; 10 = pitch -128 / yaw -192,
+ * split screen +64 / -+288 for the two cameras; 7 = both 0; 0 = yaw + the
+ * steering lean at +122 unless 0x800A9D18 or stack +160 is set), and eases
+ * the angles towards them
+ * with whole units (angle += (target - angle) >> k, k the halfwords at stack
+ * +144 pitch / +152 yaw, 0x800A9B94 times): a slowly moving target was
+ * followed in pauses and jumps. Then it builds the camera matrix from them
+ * (0x8004010C, from 0x8006E1F8). This hook, at that call, repeats the same
+ * from the exact differences, in floats; camera_ease_update draws with it.
+ * A camera mode or stage outside those, or a result straying from the
+ * game's by more than its rounding can explain, falls back to the filter. */
+void tsr_native_camera_update(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    if (cpu->gpr[31] != 0x8006E1F8u) return;
+    uint32_t cam = cpu->gpr[7], sp = cpu->gpr[29];
+    if ((cam & 0xFF800000u) != 0x80000000u || (sp & 0xFF800000u) != 0x80000000u) return;
+    CamEase *e = NULL;
+    for (int i = 0; i < 4 && !e; i++) if (s_ease[i].cam == cam) e = &s_ease[i];
+    if (!e) {
+        e = &s_ease[0];
+        for (int i = 1; i < 4; i++) if (s_ease[i].frame < e->frame) e = &s_ease[i];
+        memset(e, 0, sizeof *e);
+        e->cam = cam;
+        for (int k = 0; k < 3; k++) {
+            e->game[k] = (int16_t)rd16(cam + 96u + (uint32_t)k * 2u);
+            e->eased[k] = (float)e->game[k];
+        }
+        e->frame = s_frame - 1u;
+    }
+    const float g[2] = { (float)(int16_t)rd16(cam + 96u), (float)(int16_t)rd16(cam + 98u) };
+    int mode = (int8_t)rd8(cam + 126u);
+    int t4 = (int16_t)rd16(sp + 160u);
+    int split = (int8_t)rd8(0x800A9D34u) != 0;
+    /* the game snaps to the targets when the mode changes (+126 against
+     * stack +160), and on stage 18 zeroes the angles but for modes 1, 7, 8 */
+    if (mode != t4 || (rd32(0x800AA00Cu) == 18u && mode != 1 && mode != 7 && mode != 8)) {
+        e->sh_ok = 0;
+        return;
+    }
+    double dx = (double)((int32_t)rd32(sp + 48u) - (int32_t)rd32(cam + 68u));
+    double dy = (double)((int32_t)rd32(sp + 52u) - (int32_t)rd32(cam + 72u));
+    double dz = (double)((int32_t)rd32(sp + 56u) - (int32_t)rd32(cam + 76u));
+    const double U = 4096.0 / 6.283185307179586;
+    double T[2] = { atan2(dy, sqrt(dx * dx + dz * dz)) * U, atan2(dx, dz) * U };
+    if (mode == 10) {
+        if (!split) { T[0] -= 128.0; T[1] -= 192.0; }
+        else { T[0] += 64.0; T[1] += cam == 0x800C2F20u ? -288.0 : 288.0; }
+    } else if (mode == 7) {
+        T[0] = T[1] = 0.0;
+    } else if (rd32(0x800A9D18u) == 0u && t4 == 0) {
+        T[1] += (double)(int16_t)rd16(cam + 122u);
+    }
+    const int shift[2] = { rd16(sp + 144u) & 31, rd16(sp + 152u) & 31 };
+    int n = rd16(0x800A9B94u);
+    if (n < 1) n = 1;
+    if (n > 8) n = 8;
+    for (int k = 0; k < 2; k++) {
+        float s = e->sh_ok ? e->sh[k] : g[k];
+        float t = (float)fmod(T[k], 4096.0);
+        for (int it = 0; it < n; it++) s += wrap_units(t - s) / (float)(1 << shift[k]);
+        if (s < 0.0f) s += 4096.0f;
+        if (s >= 4096.0f) s -= 4096.0f;
+        /* the game's whole-unit easing stops short by up to 2^k units */
+        if (!e->sh_ok || fabsf(wrap_units(s - g[k])) > (float)(1 << shift[k]) + 6.0f) {
+            s = g[k];
+            e->shc[k] = 0.0f;
+        }
+        e->sh[k] = s;
+        /* The game's whole units leave its camera 3 to 4 units behind the
+         * exact one on average (its HUD markers, projected with it, then
+         * sat a few pixels off the karts): pull towards it over about 20
+         * frames, too slowly to bring its steps back (0.6 unit off on
+         * average, the frame-to-frame motion as smooth). */
+        e->shc[k] += 0.05f * (wrap_units(g[k] - s) - e->shc[k]);
+    }
+    e->sh_ok = 1;
+}
+
+/* The pre-race flight's camera and the point it looks at (0x8006CE5C,
+ * 0x8006CEB4) come from 0x8007BCC4(path, first, last, position, out, loop):
+ * a path of int32 x y z points (12 bytes from +4, count at +0), the 15-bit
+ * position scaled to points * 64 and truncated, the point index its >> 6 and
+ * the step between two points its low 6 bits: out = P * 32 + (Q - P) *
+ * step / 2. With about 255 points and 24 position units a frame the step
+ * went 12 12 12 ... and 11 every 21 frames: the camera checked itself, 8 %
+ * short, twice a second. And straight between points, the camera and its
+ * aim turned and changed pace abruptly at every point (about every 5
+ * frames, up to 6 %). For those two calls the hook works the point out from
+ * the exact position on a Catmull-Rom curve through the same points and
+ * finishes the routine; other callers keep the game's. Debug +51 = 1: the
+ * game's. */
+void tsr_native_path_point(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    uint32_t ra = cpu->gpr[31];
+    if (ra != 0x8006CE64u && ra != 0x8006CEBCu) return;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 51u) == 1u) return;   /* debug: the game's */
+    uint32_t path = cpu->gpr[4];
+    if ((path & 0xFF800000u) != 0x80000000u || !rd16(path + 2u)) return;
+    uint32_t sp = cpu->gpr[29], out = rd32(sp + 16u);
+    if ((out & 0xFF800000u) != 0x80000000u) return;
+    int loop = (rd32(sp + 20u) & 0xFFFFu) != 0u;
+    int n = rd16(path);
+    int first = (int16_t)cpu->gpr[5], last = (int16_t)cpu->gpr[6];
+    if (first < 0) first = 0;
+    if (!(last < n)) last = n - 1;
+    if (last < first) { int t = first; first = last; last = t; }
+    double span;
+    if (first == last) { span = (double)n * 64.0; first = 0; last = n - 1; }
+    else span = (double)(last - first + (loop ? 1 : 0)) * 64.0;
+    double s = (double)(cpu->gpr[7] & 0x7FFFu) * span / 32768.0 / 64.0;
+    int idx = (int)floor(s);
+    double frac = s - (double)idx;
+    idx += first;
+    int next = idx + 1;
+    if (next == last + 1) next = first;
+    /* the neighbours: around the loop, or held at the ends */
+    int prev = idx > first ? idx - 1 : (loop ? last : first);
+    int next2 = next < last ? next + 1 : (loop ? first : last);
+    if (idx < 0 || idx >= n || next < 0 || next >= n || prev < 0 || prev >= n || next2 < 0 || next2 >= n) return;
+    double t = frac, t2 = t * t, t3 = t2 * t;
+    for (int i = 0; i < 3; i++) {
+        double p0 = (double)(int32_t)rd32(path + 4u + (uint32_t)prev * 12u + (uint32_t)i * 4u);
+        double p1 = (double)(int32_t)rd32(path + 4u + (uint32_t)idx * 12u + (uint32_t)i * 4u);
+        double p2 = (double)(int32_t)rd32(path + 4u + (uint32_t)next * 12u + (uint32_t)i * 4u);
+        double p3 = (double)(int32_t)rd32(path + 4u + (uint32_t)next2 * 12u + (uint32_t)i * 4u);
+        double v = 0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                          (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3);
+        psx_mod_write_word(out + (uint32_t)i * 4u, (uint32_t)(int32_t)lround(v * 32.0));
+    }
+    psx_mod_finish_function();
 }
 
 /* ---- karts, characters and other models ------------------------------------ */
@@ -1483,6 +2016,8 @@ static void model_draw_impl(struct CPUState *cpu, uint32_t address) {
         M[8] = (int16_t)(w[4] & 0xFFFFu) / 4096.0f;
         M[9] = (float)(int32_t)w[5]; M[10] = (float)(int32_t)w[6]; M[11] = (float)(int32_t)w[7];
     }
+    camera_ease_update();
+    for (int k = 0; k < nm; k++) camera_ease_apply(mats[k], &mats[k][9]);
     /* depth-cue tint (a1..a3, the DCPL far colour weights): approximate as
      * a colour scale */
     /* tint renderers: DCPL with IR1..3 = a1..a3 (4.12) and IR0 = 0, i.e.
@@ -1630,16 +2165,10 @@ static void model_draw_impl(struct CPUState *cpu, uint32_t address) {
 static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     (void)address;
     /* Scenery everywhere it is seen: races, the track preview, the attract
-     * demo and the menus' 3D scenes (character select by the window). The
-     * title and the first menu are 2D screens (the cloud sky) with the 3D
-     * camera parked high above the house (y about -10900; probably the
-     * language/menu scene of an earlier design): the game shows nothing of
-     * that scene, but drawn natively a subtractive band of it darkened the
-     * title logo. Only there: track previews fly as high (car lot, cinema)
-     * and their stage number differs after the attract demo. */
+     * demo and the menus' 3D scenes (character select by the window, the
+     * title logo over the 2D cloud sky). The title's "Disney-Pixar" plate
+     * is subtractive: over a cloud its letters turn grey, as in the game. */
     if (!s_enabled || !s_arena_host[0]) return;
-    if (!g_tsr_racing && tsr_ui_sky_recent() &&
-        ((int32_t)rd32(VIEW + 68u) >> 6) < -4000) return;
     /* Debug mode byte (mod memory, see activation log): 0 native only,
      * 1 game only, 2 both overlaid. */
     if (s_debug_mode_addr && rd8(s_debug_mode_addr + 2u)) freeze_restore();
@@ -1648,6 +2177,7 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     s_no_depth = (mode & 0x20u) != 0;
     s_no_split = (mode & 0x40u) != 0;
     s_no_expand = (mode & 0x80u) != 0;
+    s_no_quadmap = s_debug_mode_addr && rd8(s_debug_mode_addr + 52u) == 1u;
     s_split_max = s_debug_mode_addr && rd8(s_debug_mode_addr + 24u) ? rd8(s_debug_mode_addr + 24u) : 5;
     s_under_rule = s_debug_mode_addr ? rd8(s_debug_mode_addr + 25u) : 0u;
     s_split_rule = s_debug_mode_addr ? rd8(s_debug_mode_addr + 26u) : 0u;
@@ -1684,11 +2214,24 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     /* The scenery is transformed with the view's second matrix copy (view+96,
      * loaded into the GTE light-matrix slot by 0x80010584 at the start of the
      * section draw); its first row carries the widescreen X scale. */
-    for (int i = 0; i < 9; i++) c.m[i] = (int16_t)rd16(VIEW + 96u + (uint32_t)i * 2u) / 4096.0f;
+    int16_t mraw[9];
+    for (int i = 0; i < 9; i++) {
+        mraw[i] = (int16_t)rd16(VIEW + 96u + (uint32_t)i * 2u);
+        c.m[i] = mraw[i] / 4096.0f;
+    }
+    camera_ease_update();
+    camera_matrix(c.m, mraw);
     /* The section draw starts by recomputing the camera position it uses
-     * (view+80..88) from the high-precision one at view+64..72 >> 6; this
-     * hook runs before that, so take the same value directly. */
-    for (int i = 0; i < 3; i++) c.cam[i] = (float)((int32_t)rd32(VIEW + 64u + (uint32_t)i * 4u) >> 6);
+     * (view+80..88) from the high-precision one at view+64..72 >> 6, whole
+     * scenery units: the scenery stepped by up to half a unit against the
+     * karts (placed from the high-precision position) and the floor's
+     * texture shook as the camera moved. Keep the fraction (debug +49 = 1:
+     * whole units, as the game). */
+    int whole = s_debug_mode_addr && rd8(s_debug_mode_addr + 49u) == 1u;
+    for (int i = 0; i < 3; i++) {
+        int32_t hp = (int32_t)rd32(VIEW + 64u + (uint32_t)i * 4u);
+        c.cam[i] = whole ? (float)(hp >> 6) : (float)hp / 64.0f;
+    }
     c.h   = (float)(cpu->gte_ctrl[26] & 0xFFFFu);
     c.ofx = (float)(int32_t)cpu->gte_ctrl[24] / 65536.0f;
     c.ofy = (float)(int32_t)cpu->gte_ctrl[25] / 65536.0f;
@@ -1709,6 +2252,8 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     if (first) {
         emit_view_start_marker(&c, slot);
         set_ot_depth(&c);
+    } else {
+        use_view_marker(&c, slot);
     }
 
     int by_area = rd32(AREA_MODE) == 1u;
@@ -1846,6 +2391,104 @@ void tsr_native_scene_builder_entry(struct CPUState *cpu, uint32_t address) {
  * scaled by the widescreen X factor. The hook draws the entries natively
  * (depth tested like the models) and hands the game a count of zero.
  */
+/* Shared set-up of the billboard renderers (the sprite list, the particles):
+ * projection, OT and depth tables, the packet arena, and the camera matrix
+ * kept at scratchpad 0x1F8003D4 (view+96, also the GTE light matrix).
+ * Returns the frame buffer, or -1 when nothing can be drawn. */
+static int billboard_begin(Ctx *c, struct CPUState *cpu, float M[9], float *zsf4, float *sunit) {
+    ensure_banks();
+    int buf = frame_buffer_begin();
+    g_tsr_ctx = c;
+    memset(c->m, 0, sizeof c->m);
+    c->h   = (float)(cpu->gte_ctrl[26] & 0xFFFFu);
+    c->ofx = (float)(int32_t)cpu->gte_ctrl[24] / 65536.0f;
+    c->ofy = (float)(int32_t)cpu->gte_ctrl[25] / 65536.0f;
+    if (c->h <= 0.0f) return -1;
+    c->ot = rd32(0x800A9B10u);
+    c->ztab = rd32(ZTAB_PTR);
+    c->zfar = rd32(ZFAR_VAR);
+    if (c->zfar < 2u || c->zfar > 0x4000u) c->zfar = 0x4000u;
+    for (int i = 0; i < 16; i++) c->zbias[i] = rd32(ZBIAS_TABLE + (uint32_t)i * 4u) + 80u;
+    c->out = s_arena_host[buf] + s_arena_used[buf];
+    c->out_addr = s_arena[buf] + s_arena_used[buf];
+    c->out_used = 0;
+    c->out_cap = ARENA_BYTES - s_arena_used[buf];
+    c->rect_on = 0;
+    c->bank = 0;
+    find_marker_slot(c);
+    view_begin(c);
+
+    int16_t mraw[9];
+    for (int i = 0; i < 9; i++) {
+        uint32_t w = rd32(0x1F8003D4u + (uint32_t)(i / 2) * 4u);
+        mraw[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu));
+        M[i] = mraw[i] / 4096.0f;
+    }
+    camera_ease_update();
+    camera_matrix(M, mraw);
+    *zsf4 = (float)(int16_t)(cpu->gte_ctrl[30] & 0xFFFFu) / 4096.0f;
+    if (*zsf4 <= 0.0f) *zsf4 = 0.0625f;
+    /* billboard camera units -> scenery units (debug +41: value / 16) */
+    *sunit = 0.5f;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 41u)) *sunit = rd8(s_debug_mode_addr + 41u) / 16.0f;
+    s_ztab_half = 1;
+    s_cull = 0;
+    return buf;
+}
+
+static void billboard_end(Ctx *c, int buf) {
+    s_ztab_half = 0;
+    s_arena_used[buf] += c->out_used;
+}
+
+/* The clip rectangle 0x800A9F06 (left) / 0x800A9F0C (right) / 0x800A9F08
+ * (top) / 0x800A9F10 (bottom) as the object renderers see it in widescreen:
+ * game.toml clip_edge_x_load_sites widen a left edge of 0 and a right edge
+ * of 511 by the margin, so crates and shadows stay drawn at the sides. */
+static void clip_rect(float clip[4]) {
+    int32_t m = psx_mod_widescreen_x_margin();
+    int x0 = (int16_t)rd16(0x800A9F06u), x1 = (int16_t)rd16(0x800A9F0Cu);
+    if (m > 0 && x0 == 0) x0 = -m;
+    if (m > 0 && x1 == 511) x1 = 511 + m;
+    clip[0] = (float)x0; clip[1] = (float)x1;
+    clip[2] = (float)(int16_t)rd16(0x800A9F08u); clip[3] = (float)(int16_t)rd16(0x800A9F10u);
+}
+
+/* A billboard stands for a round thing (wheel, antenna tip, spark, puff of
+ * smoke) centred on its position: drawn flat at the centre depth its lower
+ * half sinks into the floor the native depth knows about. Move it towards
+ * the camera along the view rays (the screen image is unchanged), like the
+ * front of a sphere: by the same amount for every billboard (about a wheel's
+ * radius), so stacked billboards (a level-select photo, its frame, its paper
+ * and icon) keep equal depths and the game's list order still decides which
+ * one shows. */
+static void billboard_pull(NVert v[4], float z0, float sunit) {
+    float z1 = z0 - 40.0f * sunit;
+    if (z1 < s_near) z1 = s_near;
+    if (z0 > z1) {
+        float f = z1 / z0;
+        for (int k = 0; k < 4; k++) { v[k].x *= f; v[k].y *= f; v[k].z *= f; }
+    }
+}
+
+static void billboard_colour_uv(NVert v[4], uint32_t code, const uint32_t uvs[4]) {
+    for (int k = 0; k < 4; k++) {
+        v[k].r = (float)(code & 0xFFu); v[k].g = (float)((code >> 8) & 0xFFu); v[k].b = (float)((code >> 16) & 0xFFu);
+        v[k].u = (float)(uvs[k] & 0xFFu); v[k].v = (float)((uvs[k] >> 8) & 0xFFu);
+    }
+}
+
+/* One quad (corners in GPU order p0 p1 p2 p3) into an OT entry. */
+static void billboard_quad(Ctx *c, NVert v[4], uint32_t code, uint16_t tpage, uint16_t clut,
+                           uint32_t ot_entry) {
+    if (ot_entry == c->marker_entry && ot_entry >= c->ot + 4u) ot_entry -= 4u;
+    uint32_t cmd = (code & 0x02000000u) ? 0x36u : 0x34u;
+    c->uvlim = uv_range(v, 4, 1);
+    emit_tri(c, &v[0], &v[1], &v[2], cmd, clut, tpage, ot_entry, 0);
+    emit_tri(c, &v[1], &v[3], &v[2], cmd, clut, tpage, ot_entry, 0);
+    c->uvlim = 0u;
+}
+
 static void sprite_list_impl(struct CPUState *cpu, uint32_t address) {
     (void)address;
     if (!s_enabled || !s_arena_host[0]) return;
@@ -1855,44 +2498,11 @@ static void sprite_list_impl(struct CPUState *cpu, uint32_t address) {
     uint32_t list = cpu->gpr[4];
     int count = (int32_t)cpu->gpr[5];
     if (count <= 0 || (list & 0xFF800000u) != 0x80000000u) return;
-    ensure_banks();
-    int buf = frame_buffer_begin();
-
     static Ctx c;
-    g_tsr_ctx = &c;
-    memset(c.m, 0, sizeof c.m);
-    c.h   = (float)(cpu->gte_ctrl[26] & 0xFFFFu);
-    c.ofx = (float)(int32_t)cpu->gte_ctrl[24] / 65536.0f;
-    c.ofy = (float)(int32_t)cpu->gte_ctrl[25] / 65536.0f;
-    if (c.h <= 0.0f) return;
-    c.ot = rd32(0x800A9B10u);
-    c.ztab = rd32(ZTAB_PTR);
-    c.zfar = rd32(ZFAR_VAR);
-    if (c.zfar < 2u || c.zfar > 0x4000u) c.zfar = 0x4000u;
-    for (int i = 0; i < 16; i++) c.zbias[i] = rd32(ZBIAS_TABLE + (uint32_t)i * 4u) + 80u;
-    c.out = s_arena_host[buf] + s_arena_used[buf];
-    c.out_addr = s_arena[buf] + s_arena_used[buf];
-    c.out_used = 0;
-    c.out_cap = ARENA_BYTES - s_arena_used[buf];
-    c.rect_on = 0;
-    c.bank = 0;
-    find_marker_slot(&c);
-    view_begin(&c);
-
-    /* camera matrix (light-colour slot) */
-    float M[9];
-    for (int i = 0; i < 9; i++) {
-        uint32_t w = rd32(0x1F8003D4u + (uint32_t)(i / 2) * 4u);
-        M[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu)) / 4096.0f;
-    }
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return;
     int s2 = (int16_t)rd16(0x800A9806u);
-    float zsf4 = (float)(int16_t)(cpu->gte_ctrl[30] & 0xFFFFu) / 4096.0f;
-    if (zsf4 <= 0.0f) zsf4 = 0.0625f;
-    /* sprite camera units -> scenery units (debug +41: value / 16) */
-    float sunit = 0.5f;
-    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 41u)) sunit = rd8(s_debug_mode_addr + 41u) / 16.0f;
-    s_ztab_half = 1;
-    s_cull = 0;
 
     for (int i = 0; i < count && i < 4096; i++) {
         uint32_t e = list + (uint32_t)i * 28u;
@@ -1945,7 +2555,6 @@ static void sprite_list_impl(struct CPUState *cpu, uint32_t address) {
         /* GPU quad order p0 p1 p2 p3 = corners a1 t4 a0 t3 */
         const uint32_t cw[4] = { a1, t4, a0, t3 };
         NVert v[4];
-        float zsum = 0.0f;
         int behind = 0;
         uint32_t uvw = rd32(e + 20u);
         uint32_t uv0 = uvw & 0xFFFFu, W = (uvw >> 16) & 0xFFu, H = uvw >> 24;
@@ -1957,47 +2566,563 @@ static void sprite_list_impl(struct CPUState *cpu, uint32_t address) {
             v[k].y = (cy + (r21 * ox + r22 * oy) / 4096.0f) * sunit;
             v[k].z = cz * sunit;
             if (v[k].z < s_near) behind = 1;
-            zsum += cz;
-            v[k].r = (float)(code & 0xFFu); v[k].g = (float)((code >> 8) & 0xFFu); v[k].b = (float)((code >> 16) & 0xFFu);
-            v[k].u = (float)(uvs[k] & 0xFFu); v[k].v = (float)((uvs[k] >> 8) & 0xFFu);
         }
-        /* A billboard stands for a round thing (wheel, antenna tip, spark)
-         * centred on its position: drawn flat at the centre depth its lower
-         * half sinks into the floor the native depth knows about. Move it
-         * towards the camera by its half size along the view rays (the
-         * screen image is unchanged), like the front of a sphere. */
-        {
-            float hw = (float)(int16_t)(rd32(e + 8u) & 0xFFFFu), hh = (float)(int16_t)(rd32(e + 8u) >> 16);
-            /* the same for every billboard (about a wheel's radius): stacked
-             * billboards (a level-select photo, its frame, its paper and
-             * icon) keep equal depths, so the game's list order still
-             * decides which one shows */
-            (void)hw; (void)hh;
-            float r = 40.0f * sunit;
-            float z0 = cz * sunit, z1 = z0 - r;
-            if (z1 < s_near) z1 = s_near;
-            if (z0 > z1) {
-                float f = z1 / z0;
-                for (int k = 0; k < 4; k++) { v[k].x *= f; v[k].y *= f; v[k].z *= f; }
-            }
-        }
+        billboard_colour_uv(v, code, uvs);
+        billboard_pull(v, cz * sunit, sunit);
         if (behind) continue;
-        int otz = (int)(zsum * zsf4);
+        int otz = (int)(4.0f * cz * zsf4);
         if (otz < 40) continue;
         int idx = otz + bias;
         if (idx < 0) idx = 0;
         if ((uint32_t)idx >= c.zfar) continue;
-        uint32_t ot_entry = c.ot + rd16(c.ztab + (uint32_t)idx * 2u);
-        if (ot_entry == c.marker_entry && ot_entry >= c.ot + 4u) ot_entry -= 4u;
         uint32_t w16 = rd32(e + 16u);
-        uint16_t tpage = (uint16_t)(w16 & 0xFFFFu), clut = (uint16_t)(w16 >> 16);
-        uint32_t cmd = (code & 0x02000000u) ? 0x36u : 0x34u;
-        emit_tri(&c, &v[0], &v[1], &v[2], cmd, clut, tpage, ot_entry, 0);
-        emit_tri(&c, &v[1], &v[3], &v[2], cmd, clut, tpage, ot_entry, 0);
+        billboard_quad(&c, v, code, (uint16_t)(w16 & 0xFFFFu), (uint16_t)(w16 >> 16),
+                       c.ot + rd16(c.ztab + (uint32_t)idx * 2u));
     }
-    s_ztab_half = 0;
-    s_arena_used[buf] += c.out_used;
+    billboard_end(&c, buf);
     cpu->gpr[5] = 0;   /* the game's renderer finds nothing to draw */
+}
+
+/* ---- particles (smoke, dust, sparks) --------------------------------------
+ *
+ * 0x80011058(x, y, z: the view's camera position, view+64) draws the 64
+ * entries of the particle table at 0x800DBB70 (60 bytes each) as POLY_FT4:
+ *   +0  x, y, z int32, in the camera position's units
+ *   +38 half width, +40 half height (u16)
+ *   +44 sprite (0 = free): 0x800CCDC0[sprite] -> u8 +2 width, +3 height,
+ *       u16 +4 tpage, +6 clut, +8 + frame * 2 u0 v0
+ *   +49 animation frame
+ *   +50 flags: 0x10 lies flat, 0x60 blend mode (added to the tpage),
+ *       0x200 set by the routine when the particle was drawn
+ *   +52 angle (sin table 0x8009F264, cos at +2048)
+ *   +56 GPU command + colour
+ * The centre is (position - camera) >> 5 rotated by the camera matrix, in
+ * the sprite list's units. A standing particle's corners are offsets in a
+ * screen-aligned plane (1.6 times as wide, or 1.5 when turned, as the game's
+ * matrix has it); a flat one's lie in the ground plane, turned by the angle
+ * about the vertical and then by the camera matrix. The hook draws them
+ * natively (depth tested like the sprite list), keeps the drawn flag as the
+ * game computes it (a corner on the 512 x 256 screen, widened by the
+ * widescreen margin, depth index 40 up to twice the far limit) and finishes
+ * the routine.
+ */
+static int particles_impl(struct CPUState *cpu) {
+    if (!s_enabled || !s_arena_host[0]) return 0;
+    uint8_t mode = s_debug_mode_addr ? rd8(s_debug_mode_addr) : 0;
+    if ((mode & 0x0Fu) == 1u) return 0;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 40u) == 1u) return 0;   /* debug: billboards to the game */
+    static Ctx c;
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return 0;
+    const int32_t cam[3] = { (int32_t)cpu->gpr[4], (int32_t)cpu->gpr[5], (int32_t)cpu->gpr[6] };
+    /* the routine's screen X tests are widened by the margin (game.toml
+     * screen_x_sites 0x8001146C..0x80011490) */
+    const float xl = -(float)psx_mod_widescreen_x_margin(), xr = 512.0f - xl;
+
+    for (uint32_t p = 0x800DBB70u; p < 0x800DBB70u + 64u * 60u; p += 60u) {
+        uint32_t sprite = rd8(p + 44u);
+        if (!sprite) continue;
+        uint32_t flags = rd16(p + 50u) & ~0x200u;
+        float rel[3];
+        /* (position - camera) / 32 with the fraction kept (the game drops
+         * it: puffs stepped against the scenery) */
+        for (int i = 0; i < 3; i++) rel[i] = (float)((int32_t)rd32(p + (uint32_t)i * 4u) - cam[i]) / 32.0f;
+        float cx = M[0] * rel[0] + M[1] * rel[1] + M[2] * rel[2];
+        float cy = M[3] * rel[0] + M[4] * rel[1] + M[5] * rel[2];
+        float cz = M[6] * rel[0] + M[7] * rel[1] + M[8] * rel[2];
+        float w = (float)rd16(p + 38u), h = (float)rd16(p + 40u);
+        uint32_t angle = rd16(p + 52u);
+        float sn = 0.0f, cs = 1.0f;
+        if (angle) {
+            sn = (float)(int16_t)rd16(0x8009F264u + angle * 2u) / 16384.0f;
+            cs = (float)(int16_t)rd16(0x8009F264u + angle * 2u + 2048u) / 16384.0f;
+        }
+        /* corners in GPU order: (-w-1, -h-1), (w, -h-1), (-w-1, h), (w, h) */
+        const float ox[4] = { -w - 1.0f, w, -w - 1.0f, w };
+        const float oy[4] = { -h - 1.0f, -h - 1.0f, h, h };
+        NVert v[4];
+        float zsum = 0.0f;
+        int behind = 0;
+        for (int k = 0; k < 4; k++) {
+            float x, y, z;
+            if (flags & 0x10u) {
+                /* flat: (ox, 0, oy) turned about the vertical, then the camera */
+                float wx = cs * ox[k] - sn * oy[k], wz = sn * ox[k] + cs * oy[k];
+                x = cx + M[0] * wx + M[2] * wz;
+                y = cy + M[3] * wx + M[5] * wz;
+                z = cz + M[6] * wx + M[8] * wz;
+            } else if (angle) {
+                x = cx + 1.5f * (cs * ox[k] - sn * oy[k]);
+                y = cy + sn * ox[k] + cs * oy[k];
+                z = cz;
+            } else {
+                x = cx + 1.6f * ox[k];
+                y = cy + oy[k];
+                z = cz;
+            }
+            v[k].x = x * sunit; v[k].y = y * sunit; v[k].z = z * sunit;
+            if (v[k].z < s_near) behind = 1;
+            zsum += z;
+        }
+        int otz = (int)(zsum * zsf4);
+        int depth_ok = otz >= 40 && (uint32_t)otz < 2u * c.zfar;
+        int on_x = 0, on_y = 0;
+        for (int k = 0; k < 4 && !behind; k++) {
+            float sx = c.ofx + c.h * v[k].x / v[k].z, sy = c.ofy + c.h * v[k].y / v[k].z;
+            if (sy >= 0.0f && sy < 256.0f) on_y = 1;
+            if (sx >= xl && sx < xr) on_x = 1;
+        }
+        if (!behind && depth_ok && on_x && on_y) flags |= 0x200u;
+        psx_mod_write_half(p + 50u, (uint16_t)flags);
+        if (behind || !depth_ok) continue;
+
+        uint32_t desc = rd32(0x800CCDC0u + sprite * 4u);
+        uint32_t uv0 = rd16(desc + 8u + rd8(p + 49u) * 2u);
+        uint32_t W = rd8(desc + 2u), H = rd8(desc + 3u);
+        const uint32_t uvs[4] = { uv0, uv0 + W, uv0 + (H << 8), uv0 + W + (H << 8) };
+        uint32_t code = rd32(p + 56u);
+        billboard_colour_uv(v, code, uvs);
+        if (!(flags & 0x10u)) billboard_pull(v, cz * sunit, sunit);
+        billboard_quad(&c, v, code, (uint16_t)(rd16(desc + 4u) + (flags & 0x60u)), rd16(desc + 6u),
+                       c.ot + rd16(c.ztab + (uint32_t)otz * 2u));
+    }
+    billboard_end(&c, buf);
+    return 1;
+}
+
+/* ---- kart antennas -----------------------------------------------------------
+ *
+ * 0x80054558 draws each racer's aerial as LINE_F2 packets: per racer (812
+ * bytes from 0x800C1478, count at 0x800A9E90) skipped when byte +771 >= 32
+ * or bit 0 of byte +542 is clear, or farther than 0x20000 from the camera
+ * (view+64) on an axis; the position (+624, +628, +632) relative to the
+ * camera, >> 17 through the view+96 rows, is the translation (depth 1..4095)
+ * for the four SVECTOR points at +492 (RotTransPers4 with the GTE rotation
+ * current at entry). Colour: the racer's palette entry 0x800A5900 + 4 *
+ * 0x800A59A0[64 * byte +145] times the int16 weights at +654/+656/+658
+ * (>> 12). Three segments, or a single one from the first point to the last
+ * for the computer racers of a split-screen race (index >= 0x800A97E4).
+ * OT slot: depth table entry of SZ3 / 4 - 8.
+ * The hook draws each segment as a strip one PS1 pixel wide in the native
+ * depth (the flat bank, like the untextured scenery faces) and finishes the
+ * routine.
+ */
+/* An object's view-space coordinate, (object - camera) . view row >> 17, as
+ * the object renderers compute it, in 64 bits: their 32-bit products wrap
+ * around with the widescreen view's larger X row (game.toml's recompiler
+ * patches keep the game's own code clear of that). */
+static int64_t view_row(const int32_t d[3], const int16_t row[3]) {
+    return ((int64_t)d[0] * row[0] + (int64_t)d[1] * row[1] + (int64_t)d[2] * row[2]) >> 17;
+}
+
+/* The same without dropping the fraction, for drawing: whole units made the
+ * object step against the scenery as the camera moved. */
+static float view_row_f(const int32_t d[3], const int16_t row[3]) {
+    return (float)((double)((int64_t)d[0] * row[0] + (int64_t)d[1] * row[1] + (int64_t)d[2] * row[2]) / 131072.0);
+}
+
+static void antenna_segment(Ctx *c, const float a[3], const float b[3], const float rgb[3],
+                            uint32_t ot_entry) {
+    if (a[2] < s_near || b[2] < s_near) return;
+    float ax = c->h * a[0] / a[2], ay = c->h * a[1] / a[2];
+    float bx = c->h * b[0] / b[2], by = c->h * b[1] / b[2];
+    float dx = bx - ax, dy = by - ay, len = sqrtf(dx * dx + dy * dy);
+    if (len < 1e-4f) return;
+    /* half a pixel across, and half a pixel past each end (the PS1 draws
+     * both end pixels) */
+    float nx = -dy / len * 0.5f, ny = dx / len * 0.5f, ex = dx / len * 0.5f, ey = dy / len * 0.5f;
+    const float *p[4] = { a, b, a, b };
+    const float sx[4] = { -ex + nx, ex + nx, -ex - nx, ex - nx };
+    const float sy[4] = { -ey + ny, ey + ny, -ey - ny, ey - ny };
+    NVert v[4];
+    for (int k = 0; k < 4; k++) {
+        float z = p[k][2];
+        v[k].x = p[k][0] + sx[k] * z / c->h;
+        v[k].y = p[k][1] + sy[k] * z / c->h;
+        v[k].z = z;
+        v[k].r = rgb[0]; v[k].g = rgb[1]; v[k].b = rgb[2];
+        v[k].u = v[k].v = 0.0f;
+    }
+    emit_tri(c, &v[0], &v[1], &v[2], 0x34u, 0, 0x100u, ot_entry, 0);
+    emit_tri(c, &v[1], &v[3], &v[2], 0x34u, 0, 0x100u, ot_entry, 0);
+}
+
+static int antennas_impl(struct CPUState *cpu) {
+    if (!s_enabled || !s_arena_host[0] || !s_flat_bank_ok) return 0;
+    uint8_t mode = s_debug_mode_addr ? rd8(s_debug_mode_addr) : 0;
+    if ((mode & 0x0Fu) == 1u) return 0;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 40u) == 1u) return 0;   /* debug: billboards to the game */
+    static Ctx c;
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return 0;
+    c.bank = FLAT_BANK_OPAQUE;
+    /* the GTE rotation the routine projects the points with */
+    float R[9];
+    int16_t Rraw[9];
+    for (int i = 0; i < 9; i++) {
+        uint32_t w = cpu->gte_ctrl[i / 2];
+        Rraw[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu));
+        R[i] = Rraw[i] / 4096.0f;
+    }
+    camera_matrix(R, Rraw);
+    int16_t row[9];
+    for (int i = 0; i < 9; i++) row[i] = (int16_t)rd16(VIEW + 96u + (uint32_t)i * 2u);
+    const int32_t cam[3] = { (int32_t)rd32(VIEW + 64u), (int32_t)rd32(VIEW + 68u), (int32_t)rd32(VIEW + 72u) };
+    int split = (int8_t)rd8(0x800A9D34u) != 0;
+    int players = (int8_t)rd8(0x800A97E4u);
+    int racers = (int8_t)rd8(0x800A9E90u);
+
+    for (int i = 0; i < racers; i++) {
+        uint32_t r = 0x800C1478u + (uint32_t)i * 812u;
+        if ((int8_t)rd8(r + 771u) >= 32 || !(rd8(r + 542u) & 1u)) continue;
+        int32_t d[3];
+        int far = 0;
+        for (int k = 0; k < 3; k++) {
+            d[k] = (int32_t)rd32(r + 624u + (uint32_t)k * 4u) - cam[k];
+            if ((uint32_t)(d[k] + 0x20000) > 0x40000u) far = 1;
+        }
+        if (far) continue;
+        int64_t tz = view_row(d, row + 6);
+        if (tz >= 4096 || tz <= 0) continue;
+        float tr[3];
+        camera_offset(d, row, tr);
+        float pt[4][3];
+        for (int k = 0; k < 4; k++) {
+            uint32_t sv = r + 492u + (uint32_t)k * 8u;
+            float vx = (int16_t)rd16(sv), vy = (int16_t)rd16(sv + 2u), vz = (int16_t)rd16(sv + 4u);
+            pt[k][0] = (tr[0] + R[0] * vx + R[1] * vy + R[2] * vz) * sunit;
+            pt[k][1] = (tr[1] + R[3] * vx + R[4] * vy + R[5] * vz) * sunit;
+            pt[k][2] = (tr[2] + R[6] * vx + R[7] * vy + R[8] * vz) * sunit;
+        }
+        int otz = (int)(pt[3][2] / sunit) >> 2;
+        if (otz < 1 || otz > 11999) continue;
+        otz = otz > 8 ? otz - 8 : 0;
+        uint32_t ot_entry = c.ot + ((uint32_t)rd16(c.ztab + (uint32_t)otz * 2u) & ~3u);
+        uint32_t pal = rd8(0x800A59A0u + (uint32_t)((int8_t)rd8(r + 145u) * 64));
+        float rgb[3];
+        for (int k = 0; k < 3; k++) {
+            int32_t v = (int32_t)rd8(0x800A5900u + ((uint32_t)(int8_t)pal) * 4u + (uint32_t)k) *
+                        (int16_t)rd16(r + 654u + (uint32_t)k * 2u);
+            if (v < 0) v += 4095;
+            rgb[k] = (float)((v >> 12) & 0xFF) * 0.96875f;
+        }
+        if (split && i >= players) {
+            antenna_segment(&c, pt[0], pt[3], rgb, ot_entry);
+        } else {
+            for (int k = 0; k < 3; k++) antenna_segment(&c, pt[k], pt[k + 1], rgb, ot_entry);
+        }
+    }
+    c.bank = 0;
+    billboard_end(&c, buf);
+    return 1;
+}
+
+/* ---- pick-up crates ------------------------------------------------------------
+ *
+ * 0x80054FD0 draws the crates as cubes of six POLY_GT4:
+ * entries of 44 bytes from 0x800DCB50 + 44 * byte 0x800A9F84, count at
+ * 0x800A9D0A:
+ *   +28 scale (128 = 1, <= 0 hidden), +30 squash of the top (128 = none)
+ *   +36 texture (0x800A1BB4 + 8 * n: u +2, v +3, clut offset +4)
+ *   +37 object: 92 bytes at 0x800DF6C8 + 92 * n: position +0, +4, +8,
+ *       eight SVECTOR corners +16, section +81 (-1 = always; else shown
+ *       while byte 0 or 1 of 0x800B4D70 + 52 * section is set), face
+ *       brightness +82..87, +88 mirrored in the floor
+ * Within 0x58000 of the camera on each axis, depth (view+96 rows, >> 17)
+ * 1..11263: the corners (scaled, the top four squashed towards the bottom
+ * ones, 0x80054AE8) are projected with the GTE rotation current at entry and
+ * that translation, four per face (corner table 0x8009F1A8, 16 bytes a face,
+ * drawn 0 1 3 2), kept when the screen winding is positive (NCLIP), the
+ * depth index (ZSF4 average) in 1..11999 and not wholly beyond one edge of
+ * the clip rectangle (clip_rect). Texture: tpage 0x800DB1C0 + 96
+ * (opaque), clut 0x800DB1C2 + offset, uv base plus the face's 32 x 32 tile
+ * (0x8009F208), grey = the face brightness. A mirrored crate is then drawn
+ * once more through its origin (corners negated), additive (tpage + 32,
+ * brightness / 4), sides only, the other way round, except in split screen.
+ * OT slot: depth index + 40 (at most 11999). The hook draws the faces
+ * natively and finishes the routine.
+ */
+static void crate_corners(uint32_t e, uint32_t obj, float out[8][3]) {
+    int s28 = (int16_t)rd16(e + 28u), s30 = (int16_t)rd16(e + 30u);
+    int16_t v[8][3];
+    for (int k = 0; k < 8; k++)
+        for (int i = 0; i < 3; i++) v[k][i] = (int16_t)rd16(obj + 16u + (uint32_t)k * 8u + (uint32_t)i * 2u);
+    int16_t o[8][3];
+    for (int k = 0; k < 8; k++)
+        for (int i = 0; i < 3; i++) {
+            int x = v[k][i];
+            if (s28 != 128) { x *= s28; if (x < 0) x += 127; x >>= 7; }
+            o[k][i] = (int16_t)x;
+        }
+    if (s30 != 128) {
+        for (int k = 0; k < 4; k++)
+            for (int i = 0; i < 3; i++) {
+                if (s30 == 0) { o[k][i] = o[k + 4][i]; continue; }
+                int d = v[k][i] - v[k + 4][i];
+                int x;
+                if (s28 == 128) { x = d * s30; if (x < 0) x += 127; x >>= 7; }
+                else { x = d * s28 * s30; if (x < 0) x += 16383; x >>= 14; }
+                o[k][i] = (int16_t)(o[k + 4][i] + x);
+            }
+    }
+    for (int k = 0; k < 8; k++)
+        for (int i = 0; i < 3; i++) out[k][i] = (float)o[k][i];
+}
+
+static int crates_impl(struct CPUState *cpu) {
+    if (!s_enabled || !s_arena_host[0]) return 0;
+    uint8_t mode = s_debug_mode_addr ? rd8(s_debug_mode_addr) : 0;
+    if ((mode & 0x0Fu) == 1u) return 0;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 40u) == 1u) return 0;   /* debug: billboards to the game */
+    /* 0x800A9704 set or no crates: the routine draws nothing */
+    if (!rd8(0x800A9D0Au) || (int8_t)rd8(0x800A9704u) != 0) return 0;
+    static Ctx c;
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return 0;
+    (void)M;
+    float R[9];
+    int16_t Rraw[9];
+    for (int i = 0; i < 9; i++) {
+        uint32_t w = cpu->gte_ctrl[i / 2];
+        Rraw[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu));
+        R[i] = Rraw[i] / 4096.0f;
+    }
+    camera_matrix(R, Rraw);
+    int16_t row[9];
+    for (int i = 0; i < 9; i++) row[i] = (int16_t)rd16(VIEW + 96u + (uint32_t)i * 2u);
+    const int32_t cam[3] = { (int32_t)rd32(VIEW + 64u), (int32_t)rd32(VIEW + 68u), (int32_t)rd32(VIEW + 72u) };
+    float clip[4];
+    clip_rect(clip);
+    int split = (int8_t)rd8(0x800A9D34u) != 0;
+    int count = rd8(0x800A9D0Au);
+    uint32_t e = 0x800DCB50u + rd8(0x800A9F84u) * 44u;
+
+    for (int n = 0; n < count; n++, e += 44u) {
+        if ((int16_t)rd16(e + 28u) <= 0) continue;
+        uint32_t obj = 0x800DF6C8u + rd8(e + 37u) * 92u;
+        int sec = (int8_t)rd8(obj + 81u);
+        if (sec != -1 && !rd8(0x800B4D70u + (uint32_t)sec * 52u) && !rd8(0x800B4D71u + (uint32_t)sec * 52u)) continue;
+        int32_t d[3];
+        int far = 0;
+        for (int k = 0; k < 3; k++) {
+            d[k] = (int32_t)rd32(obj + (uint32_t)k * 4u) - cam[k];
+            if ((uint32_t)(d[k] + 0x58000) > 0xB0000u) far = 1;
+        }
+        if (far) continue;
+        int64_t tz = view_row(d, row + 6);
+        if (tz >= 11264 || tz <= 0) continue;
+        float tr[3];
+        camera_offset(d, row, tr);
+        float corner[8][3];
+        crate_corners(e, obj, corner);
+        uint32_t tex = 0x800A1BB4u + rd8(e + 36u) * 8u;
+        uint32_t u0 = rd8(tex + 2u), v0 = rd8(tex + 3u);
+        uint16_t clut = (uint16_t)(rd16(0x800DB1C2u) + rd8(tex + 4u));
+
+        for (int mirror = 0; mirror < 2; mirror++) {
+            if (mirror && (!(int8_t)rd8(obj + 88u) || split)) break;
+            float cs[8][3];
+            for (int k = 0; k < 8; k++) {
+                float x = mirror ? -corner[k][0] : corner[k][0];
+                float y = mirror ? -corner[k][1] : corner[k][1];
+                float z = mirror ? -corner[k][2] : corner[k][2];
+                for (int i = 0; i < 3; i++) cs[k][i] = tr[i] + R[i * 3] * x + R[i * 3 + 1] * y + R[i * 3 + 2] * z;
+            }
+            uint16_t tpage = (uint16_t)(rd16(0x800DB1C0u) + (mirror ? 32u : 96u));
+            for (int f = 0; f < 6; f++) {
+                if (mirror && (f == 0 || f == 5)) continue;
+                int ix[4];
+                for (int k = 0; k < 4; k++) ix[k] = (int)rd32(0x8009F1A8u + (uint32_t)f * 16u + (uint32_t)k * 4u) & 7;
+                /* projection order: 0 1 3 2, or 1 0 2 3 mirrored */
+                const int ord[4] = { mirror ? ix[1] : ix[0], mirror ? ix[0] : ix[1],
+                                     mirror ? ix[2] : ix[3], mirror ? ix[3] : ix[2] };
+                NVert v[4];
+                float sx[4], sy[4], zsum = 0.0f;
+                int behind = 0;
+                for (int k = 0; k < 4; k++) {
+                    const float *p = cs[ord[k]];
+                    if (p[2] * sunit < s_near) { behind = 1; break; }
+                    sx[k] = c.ofx + c.h * p[0] / p[2];
+                    sy[k] = c.ofy + c.h * p[1] / p[2];
+                    zsum += p[2];
+                    v[k].x = p[0] * sunit; v[k].y = p[1] * sunit; v[k].z = p[2] * sunit;
+                }
+                if (behind) continue;
+                float nclip = sx[0] * sy[1] + sx[1] * sy[2] + sx[2] * sy[0] - sx[0] * sy[2] - sx[1] * sy[0] - sx[2] * sy[1];
+                if (nclip <= 0.0f) continue;
+                int otz = (int)(zsum * zsf4);
+                if (otz < 1 || otz > 11999) continue;
+                int out = 1;
+                for (int k = 0; k < 4 && out; k++) if (sx[k] >= clip[0]) out = 0;
+                if (out) continue;
+                out = 1;
+                for (int k = 0; k < 4 && out; k++) if (sx[k] <= clip[1]) out = 0;
+                if (out) continue;
+                out = 1;
+                for (int k = 0; k < 4 && out; k++) if (sy[k] >= clip[2]) out = 0;
+                if (out) continue;
+                out = 1;
+                for (int k = 0; k < 4 && out; k++) if (sy[k] <= clip[3]) out = 0;
+                if (out) continue;
+                otz += 40;
+                if (otz > 11999) otz = 11999;
+                uint32_t uo = u0 + rd32(0x8009F208u + (uint32_t)f * 8u), vo = v0 + rd32(0x8009F20Cu + (uint32_t)f * 8u);
+                const float uu[4] = { (float)(uo & 0xFFu), (float)((uo + 31u) & 0xFFu), (float)(uo & 0xFFu), (float)((uo + 31u) & 0xFFu) };
+                const float vv[4] = { (float)(vo & 0xFFu), (float)(vo & 0xFFu), (float)((vo + 31u) & 0xFFu), (float)((vo + 31u) & 0xFFu) };
+                uint32_t shade = rd8(obj + 82u + (uint32_t)f);
+                if (mirror) shade >>= 2;
+                for (int k = 0; k < 4; k++) {
+                    v[k].r = v[k].g = v[k].b = (float)shade;
+                    v[k].u = uu[k]; v[k].v = vv[k];
+                }
+                uint32_t ot_entry = c.ot + ((uint32_t)rd16(c.ztab + (uint32_t)otz * 2u) & ~3u);
+                if (ot_entry == c.marker_entry && ot_entry >= c.ot + 4u) ot_entry -= 4u;
+                uint32_t cmd = mirror ? 0x36u : 0x34u;
+                c.uvlim = uv_range(v, 4, 0);
+                emit_tri(&c, &v[0], &v[1], &v[2], cmd, clut, tpage, ot_entry, 0);
+                emit_tri(&c, &v[1], &v[3], &v[2], cmd, clut, tpage, ot_entry, 0);
+                c.uvlim = 0u;
+            }
+        }
+    }
+    billboard_end(&c, buf);
+    return 1;
+}
+
+/* ---- shadows -------------------------------------------------------------------
+ *
+ * 0x80055A24(list, count) draws blob shadows (the racers', one call each
+ * from 0x800C60A8 + 248 * racer, and a list at 0x800BF310) as subtractive
+ * POLY_FT4, 56 bytes an entry:
+ *   +0 x, y, z int32   +12 four SVECTOR corners (+12 +20 +28 +36)
+ *   +44 u, +45 width, +46 v, +47 height   +48 texmap (texture table
+ *   0x800DB070: tpage + 64, i.e. subtractive; clut + int8 +49)
+ *   +50 scale (128 = 1; 0 hidden), +51 shown, +52 darkness, +55 section
+ *   (-1 = always, else shown while byte 0 or 1 of 0x800B4D70 + 52 * section
+ *   is set)
+ * Within 0x20000 of the camera on each axis, depth (view+96 rows, >> 17)
+ * 1..4095, darkness fading out linearly beyond depth 2048; corners projected
+ * with the GTE rotation current at entry (0 1 3 2), kept on a positive
+ * winding, the depth index (ZSF4 average) 1 .. far - 2 (+256 on stage 18)
+ * and not wholly beyond one edge of the clip rectangle (clip_rect). The hook
+ * draws them natively, a hair towards the camera off the floor they lie on,
+ * and finishes the routine.
+ */
+static int shadows_impl(struct CPUState *cpu) {
+    if (!s_enabled || !s_arena_host[0]) return 0;
+    uint8_t mode = s_debug_mode_addr ? rd8(s_debug_mode_addr) : 0;
+    if ((mode & 0x0Fu) == 1u) return 0;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 40u) == 1u) return 0;   /* debug: billboards to the game */
+    uint32_t list = cpu->gpr[4];
+    int count = (int32_t)cpu->gpr[5];
+    if (count <= 0 || (list & 0xFF800000u) != 0x80000000u) return 0;
+    static Ctx c;
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return 0;
+    float R[9];
+    int16_t Rraw[9];
+    for (int i = 0; i < 9; i++) {
+        uint32_t w = cpu->gte_ctrl[i / 2];
+        Rraw[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu));
+        R[i] = Rraw[i] / 4096.0f;
+    }
+    camera_matrix(R, Rraw);
+    int16_t row[9];
+    for (int i = 0; i < 9; i++) row[i] = (int16_t)rd16(VIEW + 96u + (uint32_t)i * 2u);
+    const int32_t cam[3] = { (int32_t)rd32(VIEW + 64u), (int32_t)rd32(VIEW + 68u), (int32_t)rd32(VIEW + 72u) };
+    float clip[4];
+    clip_rect(clip);
+    int zlim = (int)rd32(ZFAR_VAR) - 1;
+    int stage18 = rd32(0x800AA00Cu) == 18u;
+
+    for (int n = 0; n < count; n++) {
+        uint32_t e = list + (uint32_t)n * 56u;
+        uint32_t scale = rd8(e + 50u);
+        if (!rd8(e + 51u) || !scale) continue;
+        int sec = (int8_t)rd8(e + 55u);
+        if (sec != -1 && !rd8(0x800B4D70u + (uint32_t)sec * 52u) && !rd8(0x800B4D71u + (uint32_t)sec * 52u)) continue;
+        int32_t d[3];
+        int far = 0;
+        for (int k = 0; k < 3; k++) {
+            d[k] = (int32_t)rd32(e + (uint32_t)k * 4u) - cam[k];
+            if ((uint32_t)(d[k] + 0x20000) > 0x40000u) far = 1;
+        }
+        if (far) continue;
+        int64_t tz = view_row(d, row + 6);
+        if (tz >= 4096 || tz <= 0) continue;
+        uint32_t dark = rd8(e + 52u);
+        if (tz > 2048) {
+            int32_t f = (int32_t)dark * (int32_t)(2048 - (tz - 2048));
+            if (f < 0) f += 2047;
+            dark = (uint32_t)(f >> 11) & 0xFFu;
+        }
+        float tr[3];
+        camera_offset(d, row, tr);
+        /* corners in projection order 0 1 3 2 */
+        static const uint32_t off[4] = { 12u, 20u, 36u, 28u };
+        NVert v[4];
+        float sx[4], sy[4], zsum = 0.0f;
+        int behind = 0;
+        for (int k = 0; k < 4; k++) {
+            float p[3];
+            for (int i = 0; i < 3; i++) {
+                int x = (int16_t)rd16(e + off[k] + (uint32_t)i * 2u);
+                if (scale != 128u) { x *= (int)scale; if (x < 0) x += 127; x >>= 7; }
+                p[i] = (float)x;
+            }
+            float cx = tr[0] + R[0] * p[0] + R[1] * p[1] + R[2] * p[2];
+            float cy = tr[1] + R[3] * p[0] + R[4] * p[1] + R[5] * p[2];
+            float cz = tr[2] + R[6] * p[0] + R[7] * p[1] + R[8] * p[2];
+            if (cz * sunit < s_near) { behind = 1; break; }
+            sx[k] = c.ofx + c.h * cx / cz;
+            sy[k] = c.ofy + c.h * cy / cz;
+            zsum += cz;
+            /* a hair off the floor, towards the camera along the view ray */
+            float f = (cz - 6.0f) / cz;
+            v[k].x = cx * f * sunit; v[k].y = cy * f * sunit; v[k].z = cz * f * sunit;
+        }
+        if (behind) continue;
+        float nclip = sx[0] * sy[1] + sx[1] * sy[2] + sx[2] * sy[0] - sx[0] * sy[2] - sx[1] * sy[0] - sx[2] * sy[1];
+        if (nclip <= 0.0f) continue;
+        int otz = (int)(zsum * zsf4);
+        if (otz <= 0 || otz >= zlim) continue;
+        if (stage18) { otz += 256; if (otz >= zlim + 1) otz = zlim; }
+        int out = 1;
+        for (int k = 0; k < 4 && out; k++) if (sx[k] <= clip[1]) out = 0;
+        if (out) continue;
+        out = 1;
+        for (int k = 0; k < 4 && out; k++) if (sx[k] >= clip[0]) out = 0;
+        if (out) continue;
+        out = 1;
+        for (int k = 0; k < 4 && out; k++) if (sy[k] <= clip[3]) out = 0;
+        if (out) continue;
+        out = 1;
+        for (int k = 0; k < 4 && out; k++) if (sy[k] >= clip[2]) out = 0;
+        if (out) continue;
+        uint32_t u0 = rd8(e + 44u), w = rd8(e + 45u), v0 = rd8(e + 46u), h = rd8(e + 47u);
+        uint32_t u1 = (u0 + w + 255u) & 0xFFu, v1 = (v0 + h + 255u) & 0xFFu;
+        const float uu[4] = { (float)u0, (float)u1, (float)u0, (float)u1 };
+        const float vv[4] = { (float)v0, (float)v0, (float)v1, (float)v1 };
+        for (int k = 0; k < 4; k++) {
+            v[k].r = v[k].g = v[k].b = (float)dark;
+            v[k].u = uu[k]; v[k].v = vv[k];
+        }
+        uint32_t tm = rd8(e + 48u);
+        uint16_t tpage = (uint16_t)(rd16(TEX_TABLE + tm * 16u) + 64u);
+        uint16_t clut = (uint16_t)(rd16(TEX_TABLE + 2u + tm * 16u) + (int8_t)rd8(e + 49u));
+        uint32_t ot_entry = c.ot + ((uint32_t)rd16(c.ztab + (uint32_t)otz * 2u) & ~3u);
+        if (ot_entry == c.marker_entry && ot_entry >= c.ot + 4u) ot_entry -= 4u;
+        c.uvlim = uv_range(v, 4, 0);
+        emit_tri(&c, &v[0], &v[1], &v[2], 0x36u, clut, tpage, ot_entry, 0);
+        emit_tri(&c, &v[1], &v[3], &v[2], 0x36u, clut, tpage, ot_entry, 0);
+        c.uvlim = 0u;
+    }
+    billboard_end(&c, buf);
+    return 1;
 }
 
 /* debug: host time spent in the hooks, microseconds per VBlank (+32 scenery,
@@ -2018,6 +3143,38 @@ void tsr_native_model_draw(struct CPUState *cpu, uint32_t address) {
 void tsr_native_sprite_list_draw(struct CPUState *cpu, uint32_t address) {
     double t0 = now_us();
     sprite_list_impl(cpu, address);
+    s_us_model += now_us() - t0;
+}
+
+void tsr_native_antennas_draw(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    double t0 = now_us();
+    if (antennas_impl(cpu)) psx_mod_finish_function();
+    s_us_model += now_us() - t0;
+}
+
+void tsr_native_crates_draw(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    double t0 = now_us();
+    /* debug +45 = 1: the game draws them as well (to compare the two) */
+    if (crates_impl(cpu) && !(s_debug_mode_addr && rd8(s_debug_mode_addr + 45u) == 1u))
+        psx_mod_finish_function();
+    s_us_model += now_us() - t0;
+}
+
+void tsr_native_shadows_draw(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    double t0 = now_us();
+    /* debug +46: 1 = no shadows at all, 2 = the game draws them */
+    uint8_t dbg = s_debug_mode_addr ? rd8(s_debug_mode_addr + 46u) : 0;
+    if (dbg == 1u || (dbg != 2u && shadows_impl(cpu))) psx_mod_finish_function();
+    s_us_model += now_us() - t0;
+}
+
+void tsr_native_particles_draw(struct CPUState *cpu, uint32_t address) {
+    (void)address;
+    double t0 = now_us();
+    if (particles_impl(cpu)) psx_mod_finish_function();
     s_us_model += now_us() - t0;
 }
 

@@ -81,10 +81,16 @@ your monitor:
   Extended doubles the draw distance, Full (default) also ignores the 4:3
   visibility lists, so nothing pops in at the sides.
 
-**Native scenery renderer** (default on) — the track scenery, the karts and
-the characters are drawn by the PC instead of the emulated PlayStation GPU:
-no wobbling textures or jittering polygons, correct depth between pieces, no
-polygons cut at the 4:3 edges.
+**Native scenery renderer** (default on) — all the 3D is drawn by the PC
+instead of the emulated PlayStation GPU: the track scenery, the karts and the
+characters, the menus' 3D scenes and the title logo, and the effects (smoke
+and sparks, shadows, kart aerials, pick-up crates). No wobbling textures or
+jittering polygons, correct depth between pieces (a kart's far wheels and
+aerial no longer show through it), no polygons cut at the 4:3 edges. The
+emulated GPU is left with the 2D HUD, menus and videos. Textures keep their
+exact place on every polygon however the camera cuts it (no sliding, no
+seams, straight lines on uneven floors), and the race camera and the pre-race
+flight are worked out without the game's rounding: no small jolts.
 
 **50 fps races** — the PAL game runs at 25 fps; races can run at 50 fps (one
 player by default, two players optional on a fast PC). Game speed and music
