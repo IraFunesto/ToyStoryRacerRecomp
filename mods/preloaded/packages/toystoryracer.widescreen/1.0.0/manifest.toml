@@ -52,7 +52,7 @@ label = "Show"
 feature = "quick-start"
 id = "language"
 label = "Language"
-description = "Ask: the game's own language choice. Italiano, Español or Nederlands: the game uses that language and goes straight to the title screen (press START), without the language choice and the copyright notice."
+description = "Ask: the game's own language choice. A language: the game uses it and goes straight to the title screen (press START), without the language choice and the copyright notice. The game's program carries all six languages' texts; this disc has Italian, Spanish and Dutch voices (Spanish only in part). English voices come from the American disc when it is installed too (otherwise English, French and German keep the Italian voices)."
 group = "Fixes"
 type = "choice"
 default = "ask"
@@ -60,6 +60,18 @@ default = "ask"
 [[option.choice]]
 value = "ask"
 label = "Ask"
+
+[[option.choice]]
+value = "en"
+label = "English"
+
+[[option.choice]]
+value = "fr"
+label = "Français"
+
+[[option.choice]]
+value = "de"
+label = "Deutsch"
 
 [[option.choice]]
 value = "it"
@@ -1199,6 +1211,54 @@ replace = "803f"
 # the game shows the language choice (menu 6), else the copyright notice
 # (menu 7) unless its shown flag 0x800A9AE0 is set, else the title screen. Both
 # start out in the EXE's data: preset them.
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "00"                 # language 0
+when = { language = "en" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "en" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "01"                 # language 1
+when = { language = "fr" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "fr" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9820
+expected = "ff"
+replace = "02"                 # language 2
+when = { language = "de" }
+
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+when = { language = "de" }
+
 [[patch]]
 feature = "quick-start"
 target = "main_exe"

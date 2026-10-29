@@ -248,7 +248,7 @@ index 31c47013..bbc2c467 100644
      void (*copy_rect)(int src_x, int src_y, int dst_x, int dst_y, int w, int h);
      void (*draw_flat_triangle)(int x0, int y0, int x1, int y1, int x2, int y2,
 diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
-index ff75e9c3..6a64efd2 100644
+index ff75e9c3..8567c578 100644
 --- a/runtime/include/iso_reader.h
 +++ b/runtime/include/iso_reader.h
 @@ -23,6 +23,7 @@
@@ -267,7 +267,16 @@ index ff75e9c3..6a64efd2 100644
  };
  
  /**
-@@ -207,7 +209,29 @@ public:
+@@ -190,6 +192,8 @@ public:
+      * @return true if found, false if not found
+      */
+     bool FindFile(const std::string& path, ISOFileEntry& entry);
++    /* a disc as extracted files: a file only its layout lists, by path */
++    bool FindFolderOnlyFile(const std::string& path, ISOFileEntry& entry);
+ 
+     /**
+      * Read entire file contents into buffer
+@@ -207,7 +211,29 @@ public:
       */
      size_t GetFileSize(const std::string& path);
  
@@ -297,7 +306,7 @@ index ff75e9c3..6a64efd2 100644
      /**
       * Parse the Primary Volume Descriptor (sector 16)
       * Extracts volume ID and root directory information
-@@ -253,6 +277,7 @@ private:
+@@ -253,6 +279,7 @@ private:
      std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
      uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
      std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
@@ -1618,7 +1627,7 @@ index c833f491..bf8ce17e 100644
  void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) { g_b->copy_rect(sx, sy, dx, dy, w, h); }
  void gr_draw_flat_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {
 diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
-index af866320..bae0cbcd 100644
+index af866320..084d8732 100644
 --- a/runtime/src/iso_reader.cpp
 +++ b/runtime/src/iso_reader.cpp
 @@ -5,7 +5,9 @@
@@ -2049,7 +2058,49 @@ index af866320..bae0cbcd 100644
      seg->file.clear();
      std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
      seg->file.seekg(offset, std::ios::beg);
-@@ -963,4 +1327,201 @@ size_t ISOReader::GetFileSize(const std::string& path) {
+@@ -887,7 +1251,7 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
+                 return true;
+             }
+         }
+-        return false;
++        return FindFolderOnlyFile(path, entry);
+     }
+ 
+     // Root-level file: search root directory
+@@ -909,7 +1273,31 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
+         }
+     }
+ 
+-    // File not found
++    return FindFolderOnlyFile(path, entry);
++}
++
++/* A disc as extracted files may list files its own directories do not hold:
++ * added to the layout after the disc's last sector (another disc's voices).
++ * Found by their path in the layout; a raw file's size is its sectors' user
++ * data, as an ISO directory gives it for streams. */
++bool ISOReader::FindFolderOnlyFile(const std::string& path, ISOFileEntry& entry) {
++    if (!folder_) return false;
++    auto norm = [](std::string s) {
++        for (char& c : s) c = (c == '\\') ? '/' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
++        while (!s.empty() && s[0] == '/') s.erase(0, 1);
++        const size_t semi = s.find(';');
++        if (semi != std::string::npos) s.resize(semi);
++        return s;
++    };
++    const std::string want = norm(path);
++    for (const FolderExtent& e : folder_->extents) {
++        if (e.kind == FolderExtent::System || norm(e.path) != want) continue;
++        entry.name = want.substr(want.find_last_of('/') == std::string::npos ? 0 : want.find_last_of('/') + 1);
++        entry.lba = e.lba;
++        entry.size = e.kind == FolderExtent::Plain ? e.size : e.sectors * 2048u;
++        entry.is_directory = false;
++        return true;
++    }
+     return false;
+ }
+ 
+@@ -963,4 +1351,201 @@ size_t ISOReader::GetFileSize(const std::string& path) {
      return entry.size;
  }
  

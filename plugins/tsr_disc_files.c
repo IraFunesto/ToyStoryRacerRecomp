@@ -50,6 +50,8 @@ static int s_pos_valid;
 static int s_read_done;           /* the last CdRead was answered here */
 static uint8_t* s_buf;
 static uint32_t s_buf_cap;
+static char s_voice;              /* the voices' file letter, 0 = the game's own */
+static int s_voice_checked;       /* the language's first file looked up on the disc */
 
 static void remember(uint32_t lba, uint32_t size, int stream) {
     uint32_t sectors = (size + 2047u) / 2048u;
@@ -95,7 +97,36 @@ static void search_entry(struct CPUState* cpu, uint32_t address) {
     }
     want[n] = '\0';
     uint32_t lba = 0, size = 0;
-    if (!n || !psx_mod_disc_file_extent(want, &lba, &size)) {
+    /* The character voices in the chosen language: the game plays a line as
+     * (file, XA channel) from AUDIO/x_CHAR1..4.XA, x = E (USA), I, S, D
+     * (Europe: Italian, Spanish, Dutch by language); every language's files
+     * hold the same lines on the same channels. The other disc's files are
+     * added to the extracted disc's layout. A language without a file (the
+     * Spanish disc has CHAR1 only) answers it empty: those lines are silent,
+     * as on that disc. Without the language's voices at all (the other disc
+     * not installed) the game keeps its own. */
+    if (s_voice && !s_voice_checked) {
+        char first[] = "AUDIO/x_CHAR1.XA";
+        uint32_t l, sz;
+        first[6] = s_voice;
+        s_voice_checked = 1;
+        if (!psx_mod_disc_file_extent(first, &l, &sz)) s_voice = 0;
+    }
+    if (s_voice && n == 16 && strncmp(want, "AUDIO/", 6) == 0 && strncmp(want + 7, "_CHAR", 5) == 0 && want[12] >= '1' && want[12] <= '4' &&
+        strcmp(want + 13, ".XA") == 0 && want[6] != s_voice) {
+        char other[17];
+        memcpy(other, want, sizeof other);
+        other[6] = s_voice;
+        if (!psx_mod_disc_file_extent(other, &lba, &size)) {
+            for (uint32_t i = 0; i < 24u; ++i) psx_mod_write_byte(fp + i, 0u);
+            cpu->gpr[2] = fp;
+            psx_mod_finish_function();
+            return;
+        }
+        fprintf(stdout, "TSR VOICES: %s from %s (LBA %u)\n", want, other, lba);
+        memcpy(want, other, sizeof other);
+    }
+    if (!n || (!lba && !psx_mod_disc_file_extent(want, &lba, &size))) {
         s_pos_valid = 0;   /* not found: the library searches itself */
         return;
     }
@@ -178,8 +209,18 @@ static void sync_entry(struct CPUState* cpu, uint32_t address) {
 }
 
 static void loading_activate(void) {
+    char lang[16];
     s_nfound = 0;
     s_pos_valid = s_read_done = 0;
+    /* the voices follow the quick start's language (none: the game's own) */
+    s_voice = 0;
+    if (psx_mod_option_value("toystoryracer.widescreen", "quick-start", "language", lang, sizeof lang)) {
+        if (!strcmp(lang, "en") || !strcmp(lang, "fr") || !strcmp(lang, "de")) s_voice = 'E';
+        else if (!strcmp(lang, "it")) s_voice = 'I';
+        else if (!strcmp(lang, "es")) s_voice = 'S';
+        else if (!strcmp(lang, "nl")) s_voice = 'D';
+    }
+    s_voice_checked = 0;
     fprintf(stdout, "TSR INSTANT LOADING ACTIVATED\n");
 }
 
