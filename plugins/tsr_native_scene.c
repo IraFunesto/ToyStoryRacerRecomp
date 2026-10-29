@@ -42,6 +42,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include "mod_plugins.h"
@@ -3122,6 +3123,183 @@ static int shadows_impl(struct CPUState *cpu) {
         c.uvlim = 0u;
     }
     billboard_end(&c, buf);
+    return 1;
+}
+
+/* ---- sky dome and sea grid ------------------------------------------------------
+ *
+ * 0x80011C18(blocks, count, cells) draws the outdoor tracks' sky, and the
+ * Pier's sea, around the camera with the GTE rotation alone (its only caller,
+ * 0x80053E0C, loads the view matrix 0x800C2E18 with no translation):
+ *   block (44 bytes): +0 vertex base, +4 cells, +12 four corners (int16
+ *     x y z, 6 bytes each) for a block cull, +38 cell count
+ *   cell (12 bytes): four int16 vertex offsets, +8 a flag byte in the
+ *     scratchpad (zeroed per call for `cells` cells: a cell two blocks share
+ *     is drawn once)
+ *   vertex (12 bytes): int16 x y z, colour word at +8
+ * Each cell becomes a POLY_G4 with corners 1 0 2 3 (the diagonal 0-2)
+ * unless its AVSZ4 depth is <= 36 (game.toml lets any positive depth
+ * through) or it lies wholly beyond an edge of the clip rectangle, all of
+ * them in the OT's farthest slot (+4152), behind everything else.
+ * Natively the cells keep their place on screen but are pushed out along the
+ * view rays to millions of units: behind any scenery in depth, the
+ * perspective of their colours unchanged. Cells partly behind the camera are
+ * clipped instead of projected through the GTE's clamped corners (the game
+ * relied on the depth limit), and the top of the dome, which stops about 46
+ * degrees up, is closed with a fan to the zenith (in a wide view with the
+ * camera rolled, the track previews look past that edge).
+ */
+#define SKY_FAR      4.0e6f   /* the dome's radius after the push-out */
+#define SKY_MAX_RING 256
+
+typedef struct { int32_t x, z; uint32_t rgb; float az; } SkyRing;
+
+static int sky_ring_cmp(const void *a, const void *b) {
+    float d = ((const SkyRing *)a)->az - ((const SkyRing *)b)->az;
+    return d < 0.0f ? -1 : d > 0.0f ? 1 : 0;
+}
+
+/* a dome point in camera space, pushed out by s; flat-bank colour (31/32,
+ * as emit_face scales untextured faces) */
+static void sky_vert(const float R[9], float s, float x, float y, float z, uint32_t rgb, NVert *v) {
+    v->x = (R[0] * x + R[1] * y + R[2] * z) * s;
+    v->y = (R[3] * x + R[4] * y + R[5] * z) * s;
+    v->z = (R[6] * x + R[7] * y + R[8] * z) * s;
+    v->r = (float)(rgb & 0xFFu) * 0.96875f;
+    v->g = (float)((rgb >> 8) & 0xFFu) * 0.96875f;
+    v->b = (float)((rgb >> 16) & 0xFFu) * 0.96875f;
+    v->u = v->v = 0.0f;
+}
+
+static int sky_impl(struct CPUState *cpu) {
+    if (!s_enabled || !s_arena_host[0] || !s_flat_bank_ok) return 0;
+    uint8_t mode = s_debug_mode_addr ? rd8(s_debug_mode_addr) : 0;
+    if ((mode & 0x0Fu) == 1u) return 0;
+    if (s_debug_mode_addr && rd8(s_debug_mode_addr + 55u) == 1u) return 0;   /* debug: the game's sky */
+    uint32_t list = cpu->gpr[4];
+    int count = (int32_t)cpu->gpr[5], ncells = (int16_t)cpu->gpr[6];
+    if (count <= 0 || count > 64 || (list & 0xFF800000u) != 0x80000000u) return 0;
+    /* the farthest block corner sets the push-out */
+    float rmax = 0.0f;
+    int32_t top = 0;
+    for (int b = 0; b < count; b++)
+        for (int k = 0; k < 4; k++) {
+            uint32_t p = list + (uint32_t)b * 44u + 12u + (uint32_t)k * 6u;
+            float x = (int16_t)rd16(p), y = (int16_t)rd16(p + 2u), z = (int16_t)rd16(p + 4u);
+            float r = sqrtf(x * x + y * y + z * z);
+            if (r > rmax) rmax = r;
+            if ((int32_t)y < top) top = (int32_t)y;
+        }
+    if (rmax < 1.0f) return 0;
+    static Ctx c;
+    float M[9], zsf4, sunit;
+    int buf = billboard_begin(&c, cpu, M, &zsf4, &sunit);
+    if (buf < 0) return 0;
+    c.bank = FLAT_BANK_OPAQUE;
+    float R[9];
+    int16_t Rraw[9];
+    for (int i = 0; i < 9; i++) {
+        uint32_t w = cpu->gte_ctrl[i / 2];
+        Rraw[i] = (int16_t)((i & 1) ? (w >> 16) : (w & 0xFFFFu));
+        R[i] = Rraw[i] / 4096.0f;
+    }
+    camera_matrix(R, Rraw);
+    const float s = SKY_FAR / rmax;
+    /* the shared-cell flags, as the routine clears them */
+    if (ncells > 0 && ncells <= 2048)
+        for (uint32_t a = 0; a < (uint32_t)((ncells + 7) >> 3) * 8u; a += 4u) psx_mod_write_word(0x1F800020u + a, 0u);
+
+    for (int b = 0; b < count; b++) {
+        uint32_t blk = list + (uint32_t)b * 44u;
+        uint32_t base = rd32(blk), cells = rd32(blk + 4u);
+        int n = (int16_t)rd16(blk + 38u);
+        if ((base & 0xFF800000u) != 0x80000000u || (cells & 0xFF800000u) != 0x80000000u || n <= 0 || n > 1024) continue;
+        /* a block wholly behind the camera */
+        int front = 0;
+        for (int k = 0; k < 4 && !front; k++) {
+            uint32_t p = blk + 12u + (uint32_t)k * 6u;
+            float x = (int16_t)rd16(p), y = (int16_t)rd16(p + 2u), z = (int16_t)rd16(p + 4u);
+            front = R[6] * x + R[7] * y + R[8] * z > 0.0f;
+        }
+        if (!front) continue;
+        for (int ci = 0; ci < n; ci++) {
+            uint32_t cell = cells + (uint32_t)ci * 12u;
+            uint32_t flag = rd32(cell + 8u);
+            if ((flag & 0xFFFFFC00u) == 0x1F800000u) {
+                if (rd8(flag)) continue;
+                psx_mod_write_byte(flag, 1u);
+            }
+            /* corners 1 0 3 2: around the cell, the game's diagonal 0-2 */
+            static const int order[4] = { 1, 0, 3, 2 };
+            NVert q[4];
+            for (int k = 0; k < 4; k++) {
+                uint32_t v = base + (uint32_t)(int16_t)rd16(cell + (uint32_t)order[k] * 2u);
+                sky_vert(R, s, (int16_t)rd16(v), (int16_t)rd16(v + 2u), (int16_t)rd16(v + 4u),
+                         rd32(v + 8u) & 0x00FFFFFFu, &q[k]);
+            }
+            c.uvlim = uv_range(q, 4, 0);
+            emit_poly(&c, q, 4, 0x34u, 0, 0x100u, c.ztab, 0);
+        }
+    }
+
+    /* the cap: the dome's upper edge (its highest vertices) fanned to the
+     * zenith, coloured like the edge on average */
+    if (top < 0) {
+        static SkyRing ring[SKY_MAX_RING];
+        int nr = 0;
+        for (int b = 0; b < count && nr < SKY_MAX_RING; b++) {
+            uint32_t blk = list + (uint32_t)b * 44u;
+            int top_corners = 0;
+            for (int k = 0; k < 4; k++) top_corners += (int16_t)rd16(blk + 14u + (uint32_t)k * 6u) == top;
+            if (top_corners < 2) continue;
+            uint32_t base = rd32(blk), cells = rd32(blk + 4u);
+            int n = (int16_t)rd16(blk + 38u);
+            if ((base & 0xFF800000u) != 0x80000000u || (cells & 0xFF800000u) != 0x80000000u || n <= 0 || n > 1024) continue;
+            for (int ci = 0; ci < n && nr < SKY_MAX_RING; ci++)
+                for (int k = 0; k < 4 && nr < SKY_MAX_RING; k++) {
+                    uint32_t v = base + (uint32_t)(int16_t)rd16(cells + (uint32_t)ci * 12u + (uint32_t)k * 2u);
+                    if ((int16_t)rd16(v + 2u) != top) continue;
+                    int32_t x = (int16_t)rd16(v), z = (int16_t)rd16(v + 4u);
+                    int dup = 0;   /* neighbouring blocks repeat their shared edge */
+                    for (int t = 0; t < nr && !dup; t++) dup = ring[t].x == x && ring[t].z == z;
+                    if (dup) continue;
+                    ring[nr].x = x; ring[nr].z = z;
+                    ring[nr].rgb = rd32(v + 8u) & 0x00FFFFFFu;
+                    ring[nr].az = atan2f((float)x, (float)z);
+                    nr++;
+                }
+        }
+        if (nr >= 3) {
+            qsort(ring, (size_t)nr, sizeof ring[0], sky_ring_cmp);
+            uint32_t sr = 0, sg = 0, sb = 0;
+            float rad = 0.0f;
+            for (int i = 0; i < nr; i++) {
+                sr += ring[i].rgb & 0xFFu; sg += (ring[i].rgb >> 8) & 0xFFu; sb += (ring[i].rgb >> 16) & 0xFFu;
+                rad += sqrtf((float)ring[i].x * ring[i].x + (float)ring[i].z * ring[i].z);
+            }
+            uint32_t zrgb = (sr / (uint32_t)nr) | ((sg / (uint32_t)nr) << 8) | ((sb / (uint32_t)nr) << 16);
+            NVert t[3];
+            sky_vert(R, s, 0.0f, (float)top - rad / (float)nr, 0.0f, zrgb, &t[2]);
+            for (int i = 0; i < nr; i++) {
+                const SkyRing *a = &ring[i], *e = &ring[(i + 1) % nr];
+                sky_vert(R, s, (float)a->x, (float)top, (float)a->z, a->rgb, &t[0]);
+                sky_vert(R, s, (float)e->x, (float)top, (float)e->z, e->rgb, &t[1]);
+                c.uvlim = uv_range(t, 3, 0);
+                emit_poly(&c, t, 3, 0x34u, 0, 0x100u, c.ztab, 0);
+            }
+        }
+    }
+    c.uvlim = 0u;
+    billboard_end(&c, buf);
+    return 1;
+}
+
+/* Called by the widescreen plugin's hook on 0x80011C18 (which otherwise caps
+ * and splits the game's dome): 1 when the sky was drawn here and the routine
+ * finished. */
+int tsr_native_sky_draw(struct CPUState *cpu) {
+    if (!sky_impl(cpu)) return 0;
+    psx_mod_finish_function();
     return 1;
 }
 

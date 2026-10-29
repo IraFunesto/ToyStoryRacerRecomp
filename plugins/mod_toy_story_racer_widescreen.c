@@ -62,6 +62,7 @@ void tsr_native_particles_draw(struct CPUState *cpu, uint32_t address);
 void tsr_native_shadows_draw(struct CPUState *cpu, uint32_t address);
 void tsr_native_camera_update(struct CPUState *cpu, uint32_t address);
 void tsr_native_path_point(struct CPUState *cpu, uint32_t address);
+int tsr_native_sky_draw(struct CPUState *cpu);
 void tsr_native_crates_draw(struct CPUState *cpu, uint32_t address);
 void tsr_native_antennas_draw(struct CPUState *cpu, uint32_t address);
 #define SECTION_LIST_FN 0x80011568u   /* per-view visible-section builder (races) */
@@ -786,9 +787,12 @@ static void star_wipe_widen(void) {
  * 0..512, the 4:3 view: in wider views the snow stopped at the 4:3 edges.
  * Each flake is copied 512 to the left and to the right where the copy lands
  * in the view, keeping the snow's density (spreading the flakes instead left
- * them sparse). The frame's packets lie between the buffer start
- * (0x800A9E34) and the prim cursor; DrawOTag can run more than once per
- * frame, so a second pass resumes after the first one's copies. */
+ * them sparse). The stars that fall over the winner at the end of a race are
+ * the same kind of sprite (tpage 0x2A, CLUT 0x3E7F, 32x32 texels at u 0xE0
+ * v 0xE0, any colour, turning) over the same 0..512 and get the same copies.
+ * The frame's packets lie between the buffer start (0x800A9E34) and the prim
+ * cursor; DrawOTag can run more than once per frame, so a second pass resumes
+ * after the first one's copies. */
 static uint32_t s_snow_fb, s_snow_end;
 static void snow_widen(void) {
     int32_t m = psx_mod_widescreen_x_margin();
@@ -800,10 +804,13 @@ static void snow_widen(void) {
     int32_t w = (int32_t)psx_mod_display_width();
     if (w <= 0) w = 512;
     for (a &= ~3u; a + 40u <= cur; a += 4u) {
-        if (psx_mod_read_word(a + 4u) != 0x2E808080u) continue;
+        uint32_t w0 = psx_mod_read_word(a + 4u);
+        if ((w0 >> 24) != 0x2Eu) continue;
         if ((psx_mod_read_word(a) >> 24) != 9u) continue;
-        if (psx_mod_read_word(a + 12u) != 0x3E7EC080u) continue;
-        if ((psx_mod_read_word(a + 20u) >> 16) != 0x0029u) continue;
+        uint32_t w2 = psx_mod_read_word(a + 12u), tp = psx_mod_read_word(a + 20u) >> 16;
+        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && tp == 0x0029u;
+        int star = w2 == 0x3E7FE0E0u && tp == 0x002Au;
+        if (!flake && !star) continue;
         int32_t lo = 0x7FFF, hi = -0x7FFF;
         for (int v = 0; v < 4; v++) {
             int32_t x = (int16_t)psx_mod_read_half(a + 8u + (uint32_t)v * 8u);
@@ -1257,6 +1264,7 @@ static void sky_split_flush(void) {
 static void tsr_sky_draw_entry(struct CPUState *cpu, uint32_t address) {
     (void)address;
     sky_split_flush();   /* the other view's dome (two players) */
+    if (tsr_native_sky_draw(cpu)) return;   /* drawn natively, routine finished */
     if (psx_mod_widescreen_x_margin() <= 0) return;   /* 4:3: as the game draws it */
     sky_cap(cpu);
     s_sky_split_start = psx_mod_read_word(PRIM_CURSOR);
