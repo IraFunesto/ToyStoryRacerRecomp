@@ -208,10 +208,17 @@ static void sync_entry(struct CPUState* cpu, uint32_t address) {
     psx_mod_finish_function();
 }
 
+/* The streams too: a disc of files has no head to move, so the drive starts
+ * a voice or a piece of music at once instead of the console's seek and spin
+ * up (up to about 70 ms: a character's voice on the selection screen came
+ * late); the sectors still arrive at the drive's rate. */
+extern int g_psx_cd_fast_stream_start;
+
 static void loading_activate(void) {
     char lang[16];
     s_nfound = 0;
     s_pos_valid = s_read_done = 0;
+    g_psx_cd_fast_stream_start = 1;
     /* the voices follow the quick start's language (none: the game's own) */
     s_voice = 0;
     if (psx_mod_option_value("toystoryracer.widescreen", "quick-start", "language", lang, sizeof lang)) {

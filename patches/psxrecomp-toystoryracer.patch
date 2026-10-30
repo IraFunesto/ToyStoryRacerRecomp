@@ -492,10 +492,37 @@ index 0d82b7b9..560a6725 100644
  
  int psx_bios_hle_enabled(void)           { return s_call_hle_on; }
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
-index f12160a7..62cf351a 100644
+index f12160a7..c20c3b4e 100644
 --- a/runtime/src/cdrom.c
 +++ b/runtime/src/cdrom.c
-@@ -1505,7 +1505,9 @@ static int read_sector_at(int min, int sec, int sect) {
+@@ -660,10 +660,17 @@ static int sector_delay_cycles(void) {
+     return apply_read_speed(base);
+ }
+ 
++/* Game mods may make the drive start reading at once (a disc as extracted
++ * files has no head to move): seeks complete as a near one and a read starts
++ * after one 2x sector period, while the sectors still arrive at the drive's
++ * own rate (XA audio keeps its pitch and pace). 0 keeps the hardware model. */
++int g_psx_cd_fast_stream_start = 0;
++
+ static int initial_read_delay_cycles(void) {
+     /* Beetle/PCSX model an additional read-start latency after ReadN/ReadS.
+      * In double-speed mode the first sector still waits one 1x sector period;
+      * subsequent sectors use the steady-state 2x cadence above. */
++    if (g_psx_cd_fast_stream_start) return CDROM_SINGLE_SPEED_SECTOR_CYCLES / 2;
+     int base = (mode_reg & 0x80)
+         ? CDROM_SINGLE_SPEED_SECTOR_CYCLES
+         : (CDROM_SINGLE_SPEED_SECTOR_CYCLES * 2);
+@@ -674,7 +681,7 @@ static int seek_complete_delay_cycles(void) {
+     /* PCSX carries a far-SetLoc seek state and explicitly calls out Rockman X5:
+      * far SeekL/SeekP completes after roughly four 1x sector periods, while a
+      * near/already-settled seek returns quickly. */
+-    int base = setloc_seek_far ? (CDROM_SINGLE_SPEED_SECTOR_CYCLES * 4) : 0x800;
++    int base = (setloc_seek_far && !g_psx_cd_fast_stream_start) ? (CDROM_SINGLE_SPEED_SECTOR_CYCLES * 4) : 0x800;
+     return apply_speed(base);
+ }
+ 
+@@ -1505,7 +1512,9 @@ static int read_sector_at(int min, int sec, int sect) {
  
      if (delivery.data_delivered) {
          memcpy(last_sector_buffer, wb->data, (size_t)wb->size);
@@ -506,7 +533,7 @@ index f12160a7..62cf351a 100644
          if (s_warm_route_active) s_warm_route_sectors++;
      } else {
          uint32_t copy_size = history_size < SECTOR_BUFFER_SIZE ? (uint32_t)history_size
-@@ -2056,7 +2058,14 @@ static void queue_or_exec_command(uint8_t cmd) {
+@@ -2056,7 +2065,14 @@ static void queue_or_exec_command(uint8_t cmd) {
   * async CD queue never pumping the next file). Hence also NO apply_speed():
   * disc-speed divisors / 'instant' mode must never compress this latency back
   * into the race window. Call BEFORE stop_read_stream()/CDSTAT_READ clear. */
@@ -521,7 +548,7 @@ index f12160a7..62cf351a 100644
      if (!reading && !(stat_reg & (CDSTAT_READ | CDSTAT_PLAY)))
          return 5000;
      int lba = reading ? msf_to_lba(read_min, read_sec, read_sect)
-@@ -3246,6 +3255,12 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
+@@ -3246,6 +3262,12 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
   * must stay authentic. */
  int cdrom_load_in_progress(void) {
      if (xa_stream_active) return 0;
@@ -534,7 +561,7 @@ index f12160a7..62cf351a 100644
      if (reading) return 1;
      if (s_burst_count > 0) {
          const CdBurst *b = &s_bursts[(s_burst_count - 1u) % CD_BURST_CAP];
-@@ -3256,7 +3271,7 @@ int cdrom_load_in_progress(void) {
+@@ -3256,7 +3278,7 @@ int cdrom_load_in_progress(void) {
  }
  
  int cdrom_data_read_active(void) {
@@ -543,7 +570,7 @@ index f12160a7..62cf351a 100644
  }
  
  /* Savestate post-load: authentic CD second-response delays (ReadTOC ~30M
-@@ -3542,6 +3557,19 @@ uint32_t cdrom_mounted_sector_count(void) {
+@@ -3542,6 +3564,19 @@ uint32_t cdrom_mounted_sector_count(void) {
      return iso_handle ? iso_sector_count(iso_handle) : 0u;
  }
  
