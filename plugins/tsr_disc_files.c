@@ -99,7 +99,8 @@ static void search_entry(struct CPUState* cpu, uint32_t address) {
     uint32_t lba = 0, size = 0;
     /* The character voices in the chosen language: the game plays a line as
      * (file, XA channel) from AUDIO/x_CHAR1..4.XA, x = E (USA), I, S, D
-     * (Europe: Italian, Spanish, Dutch by language); every language's files
+     * (SLES-03398: Italian, Spanish, Dutch by language), F, G (SLES-03397:
+     * French, German); every language's files
      * hold the same lines on the same channels. The other disc's files are
      * added to the extracted disc's layout. A language without a file (the
      * Spanish disc has CHAR1 only) answers it empty: those lines are silent,
@@ -110,7 +111,11 @@ static void search_entry(struct CPUState* cpu, uint32_t address) {
         uint32_t l, sz;
         first[6] = s_voice;
         s_voice_checked = 1;
-        if (!psx_mod_disc_file_extent(first, &l, &sz)) s_voice = 0;
+        if (!psx_mod_disc_file_extent(first, &l, &sz)) {
+            /* French or German without that disc: the English voices */
+            first[6] = 'E';
+            s_voice = ((s_voice == 'F' || s_voice == 'G') && psx_mod_disc_file_extent(first, &l, &sz)) ? 'E' : 0;
+        }
     }
     if (s_voice && n == 16 && strncmp(want, "AUDIO/", 6) == 0 && strncmp(want + 7, "_CHAR", 5) == 0 && want[12] >= '1' && want[12] <= '4' &&
         strcmp(want + 13, ".XA") == 0 && want[6] != s_voice) {
@@ -222,7 +227,9 @@ static void loading_activate(void) {
     /* the voices follow the quick start's language (none: the game's own) */
     s_voice = 0;
     if (psx_mod_option_value("toystoryracer.widescreen", "quick-start", "language", lang, sizeof lang)) {
-        if (!strcmp(lang, "en") || !strcmp(lang, "fr") || !strcmp(lang, "de")) s_voice = 'E';
+        if (!strcmp(lang, "en")) s_voice = 'E';
+        else if (!strcmp(lang, "fr")) s_voice = 'F';
+        else if (!strcmp(lang, "de")) s_voice = 'G';
         else if (!strcmp(lang, "it")) s_voice = 'I';
         else if (!strcmp(lang, "es")) s_voice = 'S';
         else if (!strcmp(lang, "nl")) s_voice = 'D';
