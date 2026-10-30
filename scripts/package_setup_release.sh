@@ -80,8 +80,11 @@ done
 # The other discs' projects (versions/USA, versions/FrDe): sources made fresh
 # from this project by tools/make_disc_project.py --kit, from each disc's
 # probe (disc/probes/<serial>: probe output + boot executable, never shipped).
-# The setup builds the ones whose disc the player selects.
-rm -rf "${ROOT}/versions"
+# The setup builds the ones whose disc the player selects. They are made in
+# dist/kit-versions and staged after the packager: this project's own
+# versions/ may hold local builds and extracted discs, never to be shipped.
+KIT_VERSIONS="${ROOT}/dist/kit-versions/versions"
+rm -rf "${ROOT}/dist/kit-versions"
 for _probe in "${ROOT}"/disc/probes/*/; do
   _serial="$(basename "${_probe}")"
   case "${_serial}" in
@@ -90,14 +93,12 @@ for _probe in "${ROOT}"/disc/probes/*/; do
     *) continue ;;
   esac
   python "${ROOT}/tools/make_disc_project.py" --disc "${_serial}" --exe "${_probe}${_exe}" \
-    --probe "${_probe}" --out "${ROOT}/versions/${_dir}" --kit > /dev/null
+    --probe "${_probe}" --out "${KIT_VERSIONS}/${_dir}" --kit > /dev/null
 done
-if [[ -d "${ROOT}/versions" ]]; then
-  EXTRA_PROJECT+=(--project-dir versions)
-fi
 
 cd "${ROOT}"
-exec bash "${PACKAGER}" \
+_status=0
+bash "${PACKAGER}" \
   --root "${ROOT}" \
   --build-dir "${BUILD_DIR}" \
   --artifact "${ARTIFACT_TAG}" \
@@ -115,4 +116,25 @@ exec bash "${PACKAGER}" \
   --project-file README.md \
   --project-dir seeds \
   --project-dir launcher_assets \
-  "${EXTRA_PROJECT[@]}"
+  "${EXTRA_PROJECT[@]}" || _status=$?
+
+# The versions into the stage, then the zip again with them (python: the
+# packager's zip may be missing; it then stops after staging).
+STAGE_DIR="${ROOT}/dist/stage-setup-${ARTIFACT_TAG}"
+if [[ ! -d "${STAGE_DIR}" ]]; then
+  exit "${_status:-1}"
+fi
+if [[ -d "${KIT_VERSIONS}" ]]; then
+  rm -rf "${STAGE_DIR}/versions"
+  cp -a "${KIT_VERSIONS}" "${STAGE_DIR}/versions"
+fi
+# The mod catalog as this build made it (this project's own mods/ holds a
+# play install's catalog, its backups and its option choices).
+rm -rf "${STAGE_DIR}"/mods/bundled.*.bak "${STAGE_DIR}"/mods/state.toml*
+if [[ -d "${BUILD_DIR}/mods/bundled" ]]; then
+  rm -rf "${STAGE_DIR}/mods/bundled"
+  cp -a "${BUILD_DIR}/mods/bundled" "${STAGE_DIR}/mods/bundled"
+fi
+python "${ROOT}/tools/fix_readme_setup.py" "${STAGE_DIR}/README-SETUP.txt"
+_version="${RELEASE_VERSION:-$(tr -d '\r\n' < "${ROOT}/VERSION")}"
+python "${ROOT}/tools/zip_stage.py" "${STAGE_DIR}" "${ROOT}/dist/tsr-${_version}-${ARTIFACT_TAG}.zip"
