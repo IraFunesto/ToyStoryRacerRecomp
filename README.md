@@ -10,8 +10,9 @@
   <img src="docs/screenshot-ultrawide.png" alt="Toy Story Racer, two players in 32:9" width="900">
 </p>
 
-Static recompilation of **Disney•Pixar Toy Story Racer** (PlayStation, PAL
-SLES-03398, Spanish / Italian / Dutch) built on
+Static recompilation of **Disney•Pixar Toy Story Racer** (PlayStation: the
+European Es, It, Nl disc SLES-03398, the American disc SLUS-01214 and the
+European Fr, De disc SLES-03397 — any one of them is enough) built on
 [psxrecomp](https://github.com/mstan/psxrecomp) and
 [recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui). The game runs
 as native code on your PC, compiled from your own disc, with a widescreen mod,
@@ -22,7 +23,7 @@ a native 3D renderer for the tracks and a set of fixes on top.
 | | |
 |---|---|
 | Players | 2 (split screen) |
-| Region | PAL (Europe) |
+| Region | PAL (Europe) and NTSC (USA) |
 | Publisher | Disney Interactive |
 | Year | 2001 |
 
@@ -36,6 +37,31 @@ widescreen with the native renderer on, the window opening in the shape of
 your monitor, 960-line internal resolution with bilinear filtering, and the
 framework's PGXP package on. Every one of them can be changed in the
 launcher (Settings and Mods); an existing install keeps its own choices.
+
+**Three discs, one game** — the setup takes whichever of your discs you
+select (European Es, It, Nl, American, or European Fr, De) and builds that
+version; every further disc you set up adds its version:
+- *Version* (Display group, at the top): **PAL 50 Hz** plays a European
+  program, **NTSC 60 Hz** the American one, with races at 60 frames per
+  second. Play starts the chosen version with the same launcher settings,
+  mod options and memory cards; if its disc is not set up yet, the disc
+  setup opens instead.
+- *Set up another disc*: at the next Play the disc setup opens, to add
+  another of your discs. A version set up later starts with the settings of
+  the one you were using.
+- Texts and voices in every language in every version: each program carries
+  the texts of all six languages, and the character voices of every disc you
+  set up (English from the American disc, Italian, Spanish and Dutch from the
+  Es, It, Nl disc, French and German from the Fr, De disc) are copied into
+  the other versions' disc folders, so the Quick start language picks both.
+  A language whose disc you do not have uses English voices if you have
+  them, else the disc's own.
+- One memory card for all: every version reads and writes the same save
+  (the versions only name it differently), so a game saved in one continues
+  in the others.
+
+Nothing of a disc you do not set up is ever used: every file comes from your
+own discs.
 
 **The disc as files** — at the first start the game splits your disc image
 into the `tsr_data` folder of the install: every data file as a normal file,
@@ -63,10 +89,11 @@ data — so it stays a normal memory card image for any emulator.
 
 **Quick start** (Fixes group, on by default) — the game starts at the
 language choice, without the Activision, Disney Interactive and Traveller's
-Tales logo videos (*Logo videos*: Show plays them). *Language*: Italiano,
-Español or Nederlands starts straight at the title screen in that language,
-without the language choice and the copyright notice; Ask (default) keeps the
-game's own choice.
+Tales logo videos (*Logo videos*: Show plays them). *Language*: English,
+Français, Deutsch, Italiano, Español or Nederlands starts straight at the
+title screen in that language (texts and voices), without the language
+choice and the copyright notice; Ask (default on the European programs)
+keeps the game's own choice.
 
 **Widescreen** (fit to window, 16:9, 21:9 or 32:9) — a real wider field of
 view, not a stretched picture; Fit to window first opens in the shape of
@@ -94,7 +121,7 @@ flight are worked out without the game's rounding: no small jolts.
 
 **50 fps races** — the PAL game runs at 25 fps; races can run at 50 fps (one
 player by default, two players optional on a fast PC). Game speed and music
-are unchanged.
+are unchanged. The NTSC version runs at 30 fps and its races at 60 fps.
 
 **HUD size** — 100 / 85 / 75 / 65 % (default 85 %): the low-resolution HUD
 and menu art is drawn smaller so it looks sharper next to the high-resolution
@@ -141,6 +168,9 @@ filtering, save states, controller rumble.
 
 ## Disc dumps
 
+The American (SLUS-01214) and the European Fr, De (SLES-03397) discs are
+accepted as clean Redump dumps.
+
 Two dumps of the European disc (SLES-03398) are accepted. The first is clean:
 every sector's error-detection code checks out. The second, the dump this
 project was first built from, has 78 misread sectors: about 45 values in ten
@@ -166,10 +196,14 @@ game executable instead of the one on the disc (same path, e.g.
 2. Run `ToyStoryRacer_Recompiled.exe`. Nothing else needs installing: on
    first use the launcher downloads its own portable toolchain (CMake, Clang
    and Python).
-3. Select your own disc (.cue/.bin of SLES-03398) and follow the
-   **Generate & rebuild** wizard: the game is compiled on your PC.
+3. Select your own disc (.cue/.bin of SLES-03398, SLUS-01214 or SLES-03397)
+   and follow the **Generate & rebuild** wizard: that disc's version is
+   compiled on your PC.
 4. Press **Play**: widescreen and the native renderer are already on; the
    launcher's Mods page has every option.
+5. Other discs: in Mods set *Set up another disc* (or a *Version* not set up
+   yet) and press Play — the disc setup opens; select the disc and Generate
+   & rebuild again.
 
 The download contains no game data and no Sony BIOS; OpenBIOS (MIT-licensed)
 is used when you do not provide your own.
@@ -178,7 +212,8 @@ is used when you do not provide your own.
 
 The game needs a few additions to psxrecomp (a linked-list hook for the menu
 prompts, disc file overrides, CD/XA loading, the disc as files, function and
-kernel-call hooks for the instant loading and memory card, GPU packet safety,
+kernel-call hooks for the instant loading and memory card, a disc-folder hook
+and a disc-serial hook for the three-disc setup, GPU packet safety,
 CPU overclock and more). They ship inside the release zip and are kept here as
 `patches/psxrecomp-toystoryracer.patch` against the pinned `psxrecomp`
 submodule commit.
@@ -206,7 +241,9 @@ cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release --target psx-runtime
 ```
 
-Release kit (setup host, no Sony BIOS):
+Release kit (setup host, no Sony BIOS). The other discs' projects
+(`versions/USA`, `versions/FrDe`) are made by `tools/make_disc_project.py --kit`
+from each disc's probe in `disc/probes/<serial>/` (local only, never shipped):
 
 ```bash
 cmake -S . -B build-setup -G Ninja -DCMAKE_BUILD_TYPE=Release \

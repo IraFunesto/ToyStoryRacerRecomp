@@ -77,6 +77,25 @@ for _sym in psx_symbols.h psx_symbols_overlays.h; do
   fi
 done
 
+# The other discs' projects (versions/USA, versions/FrDe): sources made fresh
+# from this project by tools/make_disc_project.py --kit, from each disc's
+# probe (disc/probes/<serial>: probe output + boot executable, never shipped).
+# The setup builds the ones whose disc the player selects.
+rm -rf "${ROOT}/versions"
+for _probe in "${ROOT}"/disc/probes/*/; do
+  _serial="$(basename "${_probe}")"
+  case "${_serial}" in
+    SLUS-01214) _dir=USA; _exe=SLUS_012.14 ;;
+    SLES-03397) _dir=FrDe; _exe=SLES_033.97 ;;
+    *) continue ;;
+  esac
+  python "${ROOT}/tools/make_disc_project.py" --disc "${_serial}" --exe "${_probe}${_exe}" \
+    --probe "${_probe}" --out "${ROOT}/versions/${_dir}" --kit > /dev/null
+done
+if [[ -d "${ROOT}/versions" ]]; then
+  EXTRA_PROJECT+=(--project-dir versions)
+fi
+
 cd "${ROOT}"
 exec bash "${PACKAGER}" \
   --root "${ROOT}" \

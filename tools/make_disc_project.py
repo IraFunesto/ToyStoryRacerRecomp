@@ -1,45 +1,64 @@
 #!/usr/bin/env python3
-"""Generate the USA (SLUS-01214, NTSC) project from this European one.
+"""Generate this project for another disc of the game.
 
-The two executables are the same program: about 98% of the instructions line
-up, the global data after the code moved by a few kilobytes and some code in
-between grew or shrank (the PAL conversion, the language choice). This tool
-aligns the two instruction streams, pairs the absolute addresses the aligned
-code forms (lui + lo, jal), and rewrites every EU address the mods use --
-plugin C sources, game.toml, the mod manifest, seeds, symbols -- to its US
-twin. Recompiler and manifest code patches are checked against the US bytes.
-EU-only features are left out: the track data fix (the US disc is not
-affected) and the language choice (the US game is English only).
+This project is built for the European SLES-03398 (Es, It, Nl). The other
+discs carry the same program, recompiled: the American SLUS-01214 (NTSC,
+English) and the European SLES-03397 (Fr, De). About 98% of the
+instructions line up, the global data moved by a few kilobytes and some code
+in between grew or shrank (the PAL conversion, the language choice). This
+tool aligns the two instruction streams, pairs the absolute addresses the
+aligned code forms (lui + lo, jal), and rewrites every address the mods use
+-- plugin C sources, game.toml, the mod manifest, seeds, symbols -- to its
+twin in the target program. Recompiler and manifest code patches are re-based
+on the target's bytes. The track data fix (the SLES-03398 dump's misread
+values) is left out; the American build gets its own language option (its
+program reads the English entry of every text table: tsr_lang_tables.h).
 
-    python tools/make_us_project.py --us-exe <SLUS_012.14> --probe <dir> --out <US project>
+    python tools/make_disc_project.py --disc SLUS-01214 --exe <SLUS_012.14> --probe <dir> --out <project>
+    python tools/make_disc_project.py --disc SLES-03397 --exe <SLES_033.97> --probe <dir> --out <project>
 
 --probe is a directory written by psxrecomp/tools/new_project_layout/
-probe_disc.py for the US cue (game.toml, catalog_identity.json,
+probe_disc.py for the target's cue (game.toml, catalog_identity.json,
 ghidra_funcs.txt, probe.json). The framework (psxrecomp, recomp-ui) is linked,
-not copied, so both projects build with the same patched checkout.
+not copied, so every project builds with the same patched checkout.
 """
 import argparse, bisect, difflib, json, os, re, shutil, struct, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-MAP_FILE = os.path.join(HERE, 'us_address_map.json')
 
 # Addresses that are not program addresses (or need a hand decision).
 FIXED = {
     0x801FFFF0: 0x801FFFF0,   # stack base
     0x80000000: 0x80000000, 0x80000120: 0x80000120, 0x80000124: 0x80000124,
 }
-# The menu prompt drawer makes nine text-drawer calls in a row (number, then
-# label and glyph below, above, right, left); the US code is shorter between
-# them and the alignment slips by two calls: by their order.
-FIXED.update({
-    0x80036188: 0x80035FE8, 0x80036218: 0x8003606C, 0x800362C8: 0x8003611C,
-    0x8003635C: 0x800361AC, 0x8003640C: 0x8003625C, 0x800364A4: 0x800362EC,
-    0x80036554: 0x8003639C, 0x800365EC: 0x8003642C, 0x800366A0: 0x800364DC,
-})
-# EU code with no US twin: a value no return address can have (ra checks);
-# reported for a look in the running game.
-NO_TWIN = {0x8003D494}
+NO_TWIN = set()
+
+VARIANTS = {
+    'SLUS-01214': {
+        'exe': 'SLUS_012.14', 'title': 'Disney-Pixar Toy Story Racer (USA) Recompiled',
+        'region': 'USA', 'suffix': 'USA', 'ntsc': True, 'text_tables': True,
+        # The menu prompt drawer makes nine text-drawer calls in a row
+        # (number, then label and glyph below, above, right, left); the US
+        # code is shorter between them and the alignment slips by two calls:
+        # by their order.
+        'fixed': {
+            0x80036188: 0x80035FE8, 0x80036218: 0x8003606C, 0x800362C8: 0x8003611C,
+            0x8003635C: 0x800361AC, 0x8003640C: 0x8003625C, 0x800364A4: 0x800362EC,
+            0x80036554: 0x8003639C, 0x800365EC: 0x8003642C, 0x800366A0: 0x800364DC,
+        },
+        # code with no twin: a value no return address can have (ra checks)
+        'no_twin': {0x8003D494},
+    },
+    'SLES-03397': {
+        'exe': 'SLES_033.97', 'title': 'Disney-Pixar Toy Story Racer (Europe) (Fr,De) Recompiled',
+        'region': 'Europe', 'suffix': 'FrDe', 'ntsc': False, 'text_tables': False,
+        'voices_note': "this disc has French and German voices. English voices come from the American disc, Italian, "
+                       "Spanish (in part) and Dutch from the European Es, It, Nl disc, when they are installed too "
+                       "(otherwise English voices if there, else the disc's own).",
+        'fixed': {}, 'no_twin': set(),
+    },
+}
 
 
 # ---- the map --------------------------------------------------------------------
@@ -180,7 +199,9 @@ def adapt_word(E, Uw, R, mapper):
     if (R >> 16) != (E >> 16): return R, 'replacement kept'
     d = s16(R & 0xFFFF) - s16(E & 0xFFFF)
     du = s16(Uw & 0xFFFF) - s16(E & 0xFFFF)
-    if -4096 < du < -2000 and abs(d) > 0x800: return R, 'absolute address kept'
+    # an address (the value moved with the data) set to a new place far off:
+    # absolute; a small change (a stride, a position, a bound) carries over
+    if du and abs(d) > 0x800: return R, 'absolute address kept'
     return (R & 0xFFFF0000) | ((Uw + d) & 0xFFFF), 'same change (%+d) on the US value' % d
 
 def fix_toml_patches(text, mapper, us_data, report):
@@ -202,26 +223,38 @@ def drop_manifest_blocks(text, pred):
     parts = re.split(r'(?m)^(?=\[\[)', text)
     return ''.join(p for p in parts if not (p.startswith('[[') and pred(p)))
 
-def fix_manifest(text, mapper, us_data, report):
-    # EU-only: the track data fix (feature + its disc_user patches), the language choice
+def fix_manifest(text, mapper, us_data, report, v, serial):
+    # SLES-03398 only: the track data fix (feature + its disc_user patches)
     text = drop_manifest_blocks(text, lambda b: 'feature = "track-data-fix"' in b or 'id = "track-data-fix"' in b)
-    text = drop_manifest_blocks(text, lambda b: 'when = { language =' in b)
-    # the language option and its choices (the option block runs until the
-    # next [[option]]/[[feature]]/...): the American program's own six languages
-    parts = re.split(r'(?m)^(?=\[\[)', text)
-    out, skip = [], False
-    for p in parts:
-        if p.startswith('[[option]]'):
-            skip = 'id = "language"' in p
-            if skip: out.append(US_LANGUAGE_OPTION)
-        elif not p.startswith('[[option.choice]]'): skip = False
-        if not skip: out.append(p)
-    text = ''.join(out)
-    text = text.replace('game_id = "SLES-03398"', 'game_id = "SLUS-01214"')
-    # NTSC: the game draws 30 frames per second, the option doubles it to 60
-    for eu, us in (('50 fps', '60 fps'), ('25 fps', '30 fps'), ('draws 25 frames per second', 'draws 30 frames per second'),
-                   ('falls back to 25 ', 'falls back to 30 '), ('menus stay at 25.', 'menus stay at 30.')):
-        text = text.replace(eu, us)
+    text = re.sub(r'(?m)^# Track data fix:.*\n(?:#.*\n)*', '', text)
+    if v.get('voices_note'):
+        assert EU_VOICES_NOTE in text
+        text = text.replace(EU_VOICES_NOTE, v['voices_note'])
+    if v['text_tables']:
+        # the language option and its choices (the option block runs until
+        # the next [[option]]/[[feature]]/...): the American program's own six
+        # languages, set through its text tables instead of a language byte
+        text = drop_manifest_blocks(text, lambda b: 'when = { language =' in b)
+        parts = re.split(r'(?m)^(?=\[\[)', text)
+        out, skip = [], False
+        for p in parts:
+            if p.startswith('[[option]]'):
+                skip = 'id = "language"' in p
+                if skip: out.append(US_LANGUAGE_OPTION)
+            elif not p.startswith('[[option.choice]]'): skip = False
+            if not skip: out.append(p)
+        text = ''.join(out)
+    text = text.replace('game_id = "SLES-03398"', 'game_id = "%s"' % serial)
+    if v['ntsc']:
+        # the Version option starts on this program's standard
+        a = 'id = "standard"'
+        i = text.index(a)
+        j = text.index('default = "pal"', i)
+        text = text[:j] + 'default = "ntsc"' + text[j + len('default = "pal"'):]
+        # NTSC: the game draws 30 frames per second, the option doubles it to 60
+        for eu, us in (('50 fps', '60 fps'), ('25 fps', '30 fps'), ('draws 25 frames per second', 'draws 30 frames per second'),
+                       ('falls back to 25 ', 'falls back to 30 '), ('menus stay at 25.', 'menus stay at 30.')):
+            text = text.replace(eu, us)
     text = rewrite_text(text, mapper, 'manifest', report)
     # main_exe patches: re-based on the US bytes at the mapped address
     def sub(m):
@@ -245,6 +278,10 @@ def fix_manifest(text, mapper, us_data, report):
     return text
 
 
+EU_VOICES_NOTE = ("this disc has Italian, Spanish (in part) and Dutch voices. English voices come from the American disc, "
+                  "French and German from the European Fr, De disc, when they are installed too (otherwise English voices "
+                  "if there, else Italian).")
+
 US_LANGUAGE_OPTION = """[[option]]
 feature = "quick-start"
 id = "language"
@@ -256,7 +293,16 @@ default = "en"
 
 """ + "".join('[[option.choice]]\nvalue = "%s"\nlabel = "%s"\n\n' % c for c in (
     ('en', 'English'), ('fr', 'Français'), ('de', 'Deutsch'), ('it', 'Italiano'),
-    ('es', 'Español'), ('nl', 'Nederlands')))
+    ('es', 'Español'), ('nl', 'Nederlands'))) + """# The program has no language choice: the copyright notice is skipped as on
+# the European program when a language is set (address mapped like the rest).
+[[patch]]
+feature = "quick-start"
+target = "main_exe"
+address = 0x800A9AE0
+expected = "00"
+replace = "01"                 # copyright notice already shown
+
+"""
 
 
 def text_tables(eu_data, us_data, mapper=None):
@@ -342,24 +388,35 @@ TEXT_EXT = ('.c', '.h', '.toml', '.json', '.md', '.txt', '.py', '.cmake', '.sh',
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--us-exe', required=True)
+    ap.add_argument('--disc', required=True, choices=sorted(VARIANTS))
+    ap.add_argument('--exe', required=True)
     ap.add_argument('--probe', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--rebuild-map', action='store_true')
+    # --kit: the project for the release kit's versions/<name> (sources only:
+    # no executable of the disc, no framework links -- the setup makes them --
+    # and the memory cards of the install root)
+    ap.add_argument('--kit', action='store_true')
     args = ap.parse_args()
+    serial = args.disc
+    v = VARIANTS[serial]
+    exe = v['exe']
+    FIXED.update(v['fixed'])
+    NO_TWIN.update(v['no_twin'])
+    map_file = os.path.join(HERE, 'map_%s.json' % serial)
     eu_exe = os.path.join(ROOT, 'disc', 'SLES_033.98')
-    if args.rebuild_map or not os.path.exists(MAP_FILE):
+    if args.rebuild_map or not os.path.exists(map_file):
         print('aligning the executables (a minute or two)...')
-        json.dump(build_map(eu_exe, args.us_exe), open(MAP_FILE, 'w'))
-    mapper = Mapper(json.load(open(MAP_FILE)))
-    us_data = open(args.us_exe, 'rb').read()
+        json.dump(build_map(eu_exe, args.exe), open(map_file, 'w'))
+    mapper = Mapper(json.load(open(map_file)))
+    us_data = open(args.exe, 'rb').read()
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
     report = []
 
     files = subprocess.run(['git', 'ls-files'], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split('\n')
-    skip_prefix = ('psxrecomp', 'recomp-ui', 'patches/', '.github/', 'docs/', 'tools/make_us_project.py',
-                   'tools/us_address_map.json')
+    skip_prefix = ('psxrecomp', 'recomp-ui', 'patches/', '.github/', 'docs/', 'tools/make_disc_project.py',
+                   'tools/map_', 'tools/sync_disc_project.py', 'versions/')
     for f in files:
         if not f or f.startswith(skip_prefix): continue
         src = os.path.join(ROOT, f); dst = os.path.join(out, f)
@@ -370,14 +427,14 @@ def main():
         crlf = b'\r\n' in raw
         text = raw.decode('utf-8').replace('\r\n', '\n')
         if f.endswith('manifest.toml') and 'toystoryracer.widescreen' in f:
-            text = fix_manifest(text, mapper, us_data, report)
+            text = fix_manifest(text, mapper, us_data, report, v, serial)
         elif f == 'seeds/ghidra_funcs.txt':
             eu = {int(x, 16) for x in re.findall(r'(?m)^0x([0-9A-Fa-f]{8})', text)}
             us = {int(x, 16) for x in re.findall(r'(?m)^0x([0-9A-Fa-f]{8})', open(os.path.join(args.probe, 'ghidra_funcs.txt')).read())}
             for a in eu:
                 u, how = mapper.map(a)
                 if u is not None and how in ('code', 'fixed'): us.add(u)
-            text = ('# Seeds for SLUS_012.14: the US JAL scan plus the EU seeds mapped to it\n' +
+            text = ('# Seeds for %s: its JAL scan plus the SLES-03398 seeds mapped to it\n' % exe +
                     ''.join('0x%08x\n' % a for a in sorted(us)))
         elif f == 'catalog_identity.json':
             text = open(os.path.join(args.probe, 'catalog_identity.json'), encoding='utf-8').read()
@@ -385,26 +442,30 @@ def main():
             text = open(os.path.join(args.probe, 'probe.json'), encoding='utf-8').read()
         else:
             text = rewrite_text(text, mapper, f, report)
-        text = text.replace('SLES_033.98', 'SLUS_012.14').replace('SLES-03398', 'SLUS-01214')
+        text = text.replace('SLES_033.98', exe).replace('SLES-03398', serial)
         if f == 'game.toml':
-            text = us_game_toml(text, args.probe)
+            text = us_game_toml(text, args.probe, v['title'])
             text = fix_toml_patches(text, mapper, us_data, report)
+            if args.kit:
+                text = re.sub(r'(?m)^memcard_dir = "saves"', 'memcard_dir = "../../saves"', text)
         if f == '.recomp.json':
-            text = text.replace('"Europe"', '"USA"').replace('ToyStoryRacerRecomp"', 'ToyStoryRacerRecompUSA"')
+            text = text.replace('"Europe"', '"%s"' % v['region']).replace(
+                'ToyStoryRacerRecomp"', 'ToyStoryRacerRecomp%s"' % v['suffix'])
         if crlf: text = text.replace('\n', '\r\n')
         open(dst, 'wb').write(text.encode('utf-8'))
 
     # the framework: links to this project's patched checkouts
     for d in ('psxrecomp', 'recomp-ui'):
         dst = os.path.join(out, d)
-        if not os.path.exists(dst):
+        if not args.kit and not os.path.exists(dst):
             if os.name == 'nt':
                 subprocess.run(['cmd', '/c', 'mklink', '/J', dst, os.path.join(ROOT, d)], check=True, capture_output=True)
             else:
                 os.symlink(os.path.join(ROOT, d), dst)
     os.makedirs(os.path.join(out, 'disc'), exist_ok=True)
-    shutil.copy2(args.us_exe, os.path.join(out, 'disc', 'SLUS_012.14'))
-    tables = text_tables(open(eu_exe, "rb").read(), us_data, mapper)
+    if not args.kit:
+        shutil.copy2(args.exe, os.path.join(out, 'disc', exe))
+    tables = text_tables(open(eu_exe, "rb").read(), us_data, mapper) if v['text_tables'] else []
     hdr = open(os.path.join(ROOT, 'plugins', 'tsr_lang_tables.h'), encoding='utf-8').read()
     body = ''.join('    { 0x%08Xu, 0x%08Xu },\n' % t for t in tables)
     old = '#define TSR_LANG_TABLE_COUNT 0\nstatic const TsrLangTable TSR_LANG_TABLES[1] = { { 0u, 0u } };'
@@ -413,11 +474,11 @@ def main():
                       % (len(tables), len(tables), body))
     open(os.path.join(out, 'plugins', 'tsr_lang_tables.h'), 'w', encoding='utf-8').write(hdr)
     report.append('%d text language tables' % len(tables))
-    open(os.path.join(out, 'US_REPORT.txt'), 'w').write('\n'.join(report) + '\n')
+    open(os.path.join(out, 'DISC_REPORT.txt'), 'w').write('\n'.join(report) + '\n')
     print('\n'.join(report))
     print('%d notes; project in %s' % (len(report), out))
 
-def us_game_toml(text, probe_dir):
+def us_game_toml(text, probe_dir, title):
     p = open(os.path.join(probe_dir, 'game.toml'), encoding='utf-8').read()
     def section(t, name):
         m = re.search(r'(?ms)^\[%s\]\n.*?(?=^\[|\Z)' % re.escape(name), t)
@@ -428,7 +489,7 @@ def us_game_toml(text, probe_dir):
         if new: text = text.replace(section(text, name), new.rstrip('\n') + '\n\n')
     fp = re.search(r'required_disc_fp = "([0-9a-f]+)"', p)
     if fp: text = re.sub(r'required_disc_fp = "[0-9a-f]+"', 'required_disc_fp = "%s"' % fp.group(1), text)
-    text = re.sub(r'window_title = "[^"]*"', 'window_title = "Disney-Pixar Toy Story Racer (USA) Recompiled"', text)
+    text = re.sub(r'window_title = "[^"]*"', 'window_title = "%s"' % title, text)
     return text
 
 if __name__ == '__main__':

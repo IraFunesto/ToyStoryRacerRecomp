@@ -120,3 +120,6 @@ disc_override/
 
 # The disc as extracted files ([runtime] disc_folder): game data, never commit.
 tsr_data/
+
+# Release kit: versions/<name> are generated (tools/make_disc_project.py --kit)
+/versions/

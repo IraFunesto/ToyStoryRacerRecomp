@@ -112,9 +112,10 @@ static void search_entry(struct CPUState* cpu, uint32_t address) {
         first[6] = s_voice;
         s_voice_checked = 1;
         if (!psx_mod_disc_file_extent(first, &l, &sz)) {
-            /* French or German without that disc: the English voices */
+            /* a language without its disc: the English voices, else the
+             * game's own */
             first[6] = 'E';
-            s_voice = ((s_voice == 'F' || s_voice == 'G') && psx_mod_disc_file_extent(first, &l, &sz)) ? 'E' : 0;
+            s_voice = psx_mod_disc_file_extent(first, &l, &sz) ? 'E' : 0;
         }
     }
     if (s_voice && n == 16 && strncmp(want, "AUDIO/", 6) == 0 && strncmp(want + 7, "_CHAR", 5) == 0 && want[12] >= '1' && want[12] <= '4' &&

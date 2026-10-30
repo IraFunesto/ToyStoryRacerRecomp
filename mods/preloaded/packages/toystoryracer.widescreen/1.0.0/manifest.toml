@@ -11,6 +11,47 @@ save_compatibility = "shared"
 game_id = "SLES-03398"
 
 [[feature]]
+id = "version"
+name = "Version"
+description = "PAL 50 Hz: the European program (the Es, It, Nl disc, else the Fr, De disc). NTSC 60 Hz: the American program (the USA disc), with races at 60 frames per second. Play starts the chosen one with these settings, mod options and memory cards; a version whose disc is not set up yet opens the disc setup. Texts and voices follow the Quick start language in every version."
+group = "Display"
+default_enabled = true
+
+[[option]]
+feature = "version"
+id = "standard"
+label = "Version"
+description = "PAL 50 Hz (Europe) or NTSC 60 Hz (USA). Each needs its own disc set up in the launcher."
+group = "Display"
+type = "choice"
+default = "pal"
+
+[[option.choice]]
+value = "pal"
+label = "PAL 50 Hz"
+
+[[option.choice]]
+value = "ntsc"
+label = "NTSC 60 Hz"
+
+[[option]]
+feature = "version"
+id = "setup"
+label = "Set up another disc"
+description = "At the next Play the disc setup opens instead of the game: select another of your discs (the European Es, It, Nl, the USA or the European Fr, De disc) and Generate & rebuild adds its version and its voices. Choosing a Version whose disc is not set up opens it too."
+group = "Display"
+type = "choice"
+default = "no"
+
+[[option.choice]]
+value = "no"
+label = "No"
+
+[[option.choice]]
+value = "yes"
+label = "At the next Play"
+
+[[feature]]
 id = "widescreen"
 name = "Widescreen"
 description = "On by default. Renders a wider field of view instead of stretching the 4:3 picture, and carries the native scenery renderer, 50 fps races and the other options below. Videos stay 4:3."
@@ -321,6 +362,10 @@ label = "Original"
 [[option.choice]]
 value = "lower"
 label = "Lower"
+
+[[plugin]]
+feature = "version"
+id = "toystoryracer.versions"
 
 [[plugin]]
 feature = "widescreen"

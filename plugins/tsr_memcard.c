@@ -137,14 +137,59 @@ static int card_path(uint32_t address, char* name) {
     return s[2] - '0';
 }
 
+/* Every version names its save by its own product code: one version's save
+ * is any version's, so a file name starting with one of these codes also
+ * matches the same name under the others (its own name first). */
+static const char* const SAVE_CODES[] = {   /* split: tools/make_disc_project.py renames the serials */
+    "BESLES-" "03398", "BASLUS-" "01214", "BESLES-" "03397" };
+#define CODE_LEN 12u
+
+static int save_code(const char* name) {
+    for (size_t i = 0; i < sizeof SAVE_CODES / sizeof SAVE_CODES[0]; ++i)
+        if (strncmp(name, SAVE_CODES[i], CODE_LEN) == 0) return 1;
+    return 0;
+}
+
+/* name under the product code of want when both are save names */
+static void as_code(char* name, const char* want) {
+    if (save_code(name) && save_code(want)) memcpy(name, want, CODE_LEN);
+}
+
+/* The running version's code, from its boot file in SYSTEM.CNF
+ * ("cdrom:\SLES_033.98;1" -> "BESLES-03398"); empty when unknown. */
+static char s_own[CODE_LEN + 1];
+
+static const char* own_code(void) {
+    static int done;
+    if (done) return s_own;
+    done = 1;
+    char cnf[512];
+    uint32_t size = 0;
+    if (!psx_mod_read_disc_file("SYSTEM.CNF", cnf, sizeof cnf - 1u, &size) &&
+        !psx_mod_read_disc_file("\\SYSTEM.CNF;1", cnf, sizeof cnf - 1u, &size)) return s_own;
+    cnf[size < sizeof cnf ? size : sizeof cnf - 1u] = '\0';
+    const char* p = strstr(cnf, "cdrom:");
+    if (!p) return s_own;
+    p += 6;
+    while (*p == '\\' || *p == '/') ++p;
+    char code[CODE_LEN + 1];
+    if (strlen(p) < 11u || p[4] != '_' || p[8] != '.') return s_own;
+    snprintf(code, sizeof code, "B%c%.4s-%.3s%.2s", p[2] == 'U' ? 'A' : 'E', p, p + 5, p + 9);
+    if (save_code(code)) strcpy(s_own, code);
+    fprintf(stdout, "TSR MEMORY CARD: every version's save read as %s\n", s_own[0] ? s_own : "(unknown)");
+    return s_own;
+}
+
 /* The first block of the file called name, 0 when there is none. */
 static uint32_t find_file(int slot, const char* name, uint8_t* f) {
     char have[NAME_LEN + 1];
-    for (uint32_t b = 1; b <= BLOCKS; ++b) {
-        if (!frame_read(slot, b, f) || get32(f) != ST_FIRST) continue;
-        frame_name(f, have);
-        if (strcmp(have, name) == 0) return b;
-    }
+    for (int other = 0; other < 2; ++other)
+        for (uint32_t b = 1; b <= BLOCKS; ++b) {
+            if (!frame_read(slot, b, f) || get32(f) != ST_FIRST) continue;
+            frame_name(f, have);
+            if (other) as_code(have, name);
+            if (strcmp(have, name) == 0) return b;
+        }
     return 0;
 }
 
@@ -225,6 +270,14 @@ static int bu_open(struct CPUState* cpu) {
     uint32_t first = find_file(slot, name, f), size = first ? get32(f + 4) : 0u;
     if (mode & O_CREAT) {
         uint32_t blocks = mode >> 16 ? mode >> 16 : 1u, list[BLOCKS], n = 0;
+        char have[NAME_LEN + 1];
+        if (first) frame_name(f, have);
+        if (first && strcmp(have, name) != 0 && size == blocks * BLOCK_FRAMES * FRAME) {
+            /* another version's save: this one's is written over it */
+            s_files[fd] = (File){ 1, slot, first, mode, size, 0 };
+            cpu->gpr[2] = (uint32_t)fd;
+            return 1;
+        }
         if (first || blocks > BLOCKS) return 1;
         for (uint32_t b = 1; b <= BLOCKS && n < blocks; ++b)
             if (frame_read(slot, b, f) && (get32(f) & 0xF0u) == ST_FREE) list[n++] = b;
@@ -309,6 +362,17 @@ static uint32_t find_next(uint32_t entry) {
         const uint32_t b = s_find.next;
         if (!frame_read(s_find.slot, b, f) || get32(f) != ST_FIRST) continue;
         frame_name(f, name);
+        /* another version's save is listed under this version's name (the
+         * game looks its own up among all the card's files), unless the card
+         * holds this version's own as well */
+        char own[NAME_LEN + 1];
+        strcpy(own, name);
+        as_code(own, own_code());
+        if (strcmp(own, name) != 0) {
+            uint8_t g[FRAME];
+            if (find_file(s_find.slot, own, g) != b) continue;
+            strcpy(name, own);
+        }
         if (!name_match(s_find.pattern, name)) continue;
         ++s_find.next;
         for (uint32_t i = 0; i < NAME_LEN; ++i) psx_mod_write_byte(guest(entry + i), (uint8_t)name[i]);
