@@ -897,6 +897,10 @@ static void tsr_linked_list_hook(void) {
         if (fb != s_ui_done_fb && menu_screen()) { ui_tags_clear(); s_ui_done_fb = fb; }
     }
     ui_zone_pass();
+    /* a frame without particles forgets the last ones: the game alternates
+     * two packet buffers, and their addresses in the other buffer were taken
+     * for particles in every other frame (menu prompts left unscaled) */
+    if (psx_mod_read_word(0x800A9E34u) != s_part_fb) s_npart = s_part_done = 0;
 }
 
 /* The results screens (race and cup standings, the winner) come from the race
