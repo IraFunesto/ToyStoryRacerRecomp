@@ -514,8 +514,9 @@ static void ui_process(const UiEl *el, int charsel) {
      * or those near it shrank and moved with it */
     {
         int m = 0;
-        for (int k = 0; k < n; k++)
+        for (int k = 0; k < n; k++) {
             if (!particle_at(pk[k])) pk[m++] = pk[k];
+        }
         n = m;
         if (n <= 0) return;
     }
@@ -891,6 +892,9 @@ static void snow_widen(void) {
 }
 
 static int particle_widen(uint32_t a, int32_t m, int32_t w) {
+    /* a HUD tag left at this address by a menu prompt's packet of an
+     * earlier frame would move the particle with the HUD */
+    psx_mod_tag_hud_primitive(a, 0);
     int32_t lo = 0x7FFF, hi = -0x7FFF;
     for (int v = 0; v < 4; v++) {
         int32_t x = (int16_t)psx_mod_read_half(a + 8u + (uint32_t)v * 8u);
@@ -920,6 +924,10 @@ static void cloud_flush(void);
 /* DrawOTag: the frame's packets are complete, nothing drawn yet. */
 static void tsr_linked_list_hook(void) {
     star_wipe_widen();   /* before anything is appended after the star */
+    /* the element still being recorded (the race-end prompt) ends here:
+     * otherwise it reached over the particles' copies appended next and
+     * shrank those near it into the prompt */
+    ui_flush();
     snow_widen();
     cloud_flush();
     sky_split_flush();
