@@ -441,6 +441,7 @@ static uint32_t s_ui_ra;   /* the pending element's caller */   /* the pending e
 static int16_t s_ui_pcx, s_ui_pcy;
 static int8_t s_ui_rdx, s_ui_rdy;
 static void ui_process_frame(void);
+static int particle_at(uint32_t p);
 
 static void ui_flush(void) {
     if (!s_ui_pending) return;
@@ -510,11 +511,8 @@ static void ui_process(const UiEl *el, int charsel) {
      * or those near it shrank and moved with it */
     {
         int m = 0;
-        for (int k = 0; k < n; k++) {
-            uint32_t cmd = psx_mod_read_word(pk[k] + 4u) >> 24, w2 = psx_mod_read_word(pk[k] + 12u);
-            if ((cmd & 0xFCu) == 0x2Cu && (w2 == 0x3E7FE0E0u || w2 == 0x3E7EC080u)) continue;
-            pk[m++] = pk[k];
-        }
+        for (int k = 0; k < n; k++)
+            if (!particle_at(pk[k])) pk[m++] = pk[k];
         n = m;
         if (n <= 0) return;
     }
@@ -808,57 +806,79 @@ static void star_wipe_widen(void) {
  * keeping the density (spreading them instead left them sparse) and the
  * wrap seamless (copies 512 apart made a particle vanish and reappear at the
  * wide view's sides when it wrapped).
- * The frame's packets lie between the buffer start (0x800A9E34) and the prim
- * cursor; DrawOTag can run more than once per frame, so a second pass resumes
- * after the first one's copies. */
-static uint32_t s_snow_fb, s_snow_end;
+ * Each particle is one sprite of the icon routine 0x8004E28C called from
+ * PARTICLE_RA: its packet starts at the prim cursor of that call, recorded
+ * by tsr_ui_icon_entry (their texture, CLUT and page differ by track). */
+#define PARTICLE_RA   0x80077F98u
+#define MAX_PARTICLES 96
+static uint32_t s_part[MAX_PARTICLES], s_part_fb;
+static int s_npart, s_part_done;
+
+static void particle_record(void) {
+    uint32_t fb = psx_mod_read_word(0x800A9E34u);
+    if (fb != s_part_fb) { s_part_fb = fb; s_npart = s_part_done = 0; }
+    if (s_npart < MAX_PARTICLES) s_part[s_npart++] = psx_mod_read_word(PRIM_CURSOR);
+}
+
+/* the particle's POLY_FT4 at or just after its recorded start, else 0 */
+static uint32_t particle_packet(uint32_t start, uint32_t cur) {
+    for (uint32_t a = start & ~3u; a + 40u <= cur && a < start + 64u; a += 4u)
+        if ((psx_mod_read_word(a) >> 24) == 9u && ((psx_mod_read_word(a + 4u) >> 24) & 0xFCu) == 0x2Cu)
+            return a;
+    return 0u;
+}
+
+/* a packet some particle wrote this frame */
+static int particle_at(uint32_t p) {
+    if (psx_mod_read_word(0x800A9E34u) != s_part_fb) return 0;
+    for (int i = 0; i < s_npart; i++)
+        if (p >= s_part[i] && p < s_part[i] + 64u) return 1;
+    return 0;
+}
+
+/* copies of the particle packet a where they land in the wide view; 0 when
+ * the frame's packet buffer is full */
+static int particle_widen(uint32_t a, int32_t m, int32_t w);
+
 static void snow_widen(void) {
     int32_t m = psx_mod_widescreen_x_margin();
     if (m <= 0) return;
     uint32_t fb = psx_mod_read_word(0x800A9E34u), cur = psx_mod_read_word(PRIM_CURSOR);
     if (!ram_address(fb) || !ram_address(cur) || cur <= fb || cur - fb > 0x40000u) return;
-    uint32_t a = fb;
-    if (fb == s_snow_fb && s_snow_end > fb && s_snow_end <= cur) a = s_snow_end;
+    if (fb != s_part_fb) return;   /* no particles this frame */
     int32_t w = (int32_t)psx_mod_display_width();
     if (w <= 0) w = 512;
-    for (a &= ~3u; a + 40u <= cur; a += 4u) {
-        uint32_t w0 = psx_mod_read_word(a + 4u);
-        if ((w0 >> 24) != 0x2Eu) continue;
-        if ((psx_mod_read_word(a) >> 24) != 9u) continue;
-        uint32_t w2 = psx_mod_read_word(a + 12u), tp = psx_mod_read_word(a + 20u) >> 16;
-        /* the texture page holding them depends on the track and the
-         * players (stars seen on 0x29, 0x2A, 0x2B): told apart by their CLUT
-         * and texture corner only */
-        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && (tp & 0xFFE0u) == 0x0020u;
-        int star = w2 == 0x3E7FE0E0u && (tp & 0xFFE0u) == 0x0020u;
-        if (!flake && !star) continue;
-        int32_t lo = 0x7FFF, hi = -0x7FFF;
-        for (int v = 0; v < 4; v++) {
-            int32_t x = (int16_t)psx_mod_read_half(a + 8u + (uint32_t)v * 8u);
-            if (x < lo) lo = x; if (x > hi) hi = x;
-        }
-        for (int dir = -1; dir <= 1; dir += 2) {
-            int32_t dx = dir * (w + 64);
-            if (hi + dx < -m || lo + dx > w + m) continue;
-            uint32_t q = psx_mod_read_word(PRIM_CURSOR);
-            if (!ram_address(q) || q + 40u >= psx_mod_read_word(PRIM_LIMIT)) goto done;
-            for (uint32_t k = 4u; k < 40u; k += 4u) psx_mod_write_word(q + k, psx_mod_read_word(a + k));
-            for (int v = 0; v < 4; v++) {
-                uint32_t o = q + 8u + (uint32_t)v * 8u;
-                psx_mod_write_half(o, (uint16_t)(int16_t)((int16_t)psx_mod_read_half(o) + dx));
-            }
-            /* linked right after the original in its OT chain */
-            uint32_t t = psx_mod_read_word(a);
-            psx_mod_write_word(q, (9u << 24) | (t & 0x00FFFFFFu));
-            psx_mod_write_word(a, (t & 0xFF000000u) | (q & 0x00FFFFFFu));
-            psx_mod_write_word(PRIM_CURSOR, q + 40u);
-            psx_mod_tag_hud_primitive(q, 0);
-        }
-        a += 36u;
+    /* DrawOTag can run more than once per frame: each particle once */
+    for (; s_part_done < s_npart; s_part_done++) {
+        uint32_t a = particle_packet(s_part[s_part_done], cur);
+        if (a && !particle_widen(a, m, w)) break;
     }
-done:
-    s_snow_fb = fb;
-    s_snow_end = psx_mod_read_word(PRIM_CURSOR);
+}
+
+static int particle_widen(uint32_t a, int32_t m, int32_t w) {
+    int32_t lo = 0x7FFF, hi = -0x7FFF;
+    for (int v = 0; v < 4; v++) {
+        int32_t x = (int16_t)psx_mod_read_half(a + 8u + (uint32_t)v * 8u);
+        if (x < lo) lo = x; if (x > hi) hi = x;
+    }
+    for (int dir = -1; dir <= 1; dir += 2) {
+        int32_t dx = dir * (w + 64);
+        if (hi + dx < -m || lo + dx > w + m) continue;
+        uint32_t q = psx_mod_read_word(PRIM_CURSOR);
+        if (!ram_address(q) || q + 40u >= psx_mod_read_word(PRIM_LIMIT)) return 0;
+        for (uint32_t k = 4u; k < 40u; k += 4u) psx_mod_write_word(q + k, psx_mod_read_word(a + k));
+        for (int v = 0; v < 4; v++) {
+            uint32_t o = q + 8u + (uint32_t)v * 8u;
+            psx_mod_write_half(o, (uint16_t)(int16_t)((int16_t)psx_mod_read_half(o) + dx));
+        }
+        /* linked right after the original in its OT chain */
+        uint32_t t = psx_mod_read_word(a);
+        psx_mod_write_word(q, (9u << 24) | (t & 0x00FFFFFFu));
+        psx_mod_write_word(a, (t & 0xFF000000u) | (q & 0x00FFFFFFu));
+        psx_mod_write_word(PRIM_CURSOR, q + 40u);
+        psx_mod_tag_hud_primitive(q, 0);
+    }
+    return 1;
 }
 
 static void cloud_flush(void);
@@ -1314,6 +1334,8 @@ static void tsr_ui_icon_entry(struct CPUState* cpu, uint32_t address) {
         s_cloud_pending = 1;
     }
     ui_flush();
+    /* a falling star or snowflake: widened at DrawOTag, never a HUD element */
+    if (ra == PARTICLE_RA) { particle_record(); return; }
     /* the counter's army man, and the alarm clock next to the timer (drawn
      * by the menu screen 0x8003B8BC) */
     if ((ra >= UI_COUNTER_FN && ra < UI_COUNTER_END) || ra == UI_CLOCK_RA) {
