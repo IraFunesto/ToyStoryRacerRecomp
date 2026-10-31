@@ -786,12 +786,15 @@ static void star_wipe_widen(void) {
 /* ---- snow ------------------------------------------------------------------
  * The snowy track's flakes are screen-space POLY_FT4s (semi-transparent,
  * tpage 0x29, CLUT 0x3E7E, 16x16 texels at u 0x80 v 0xC0) placed over x
- * 0..512, the 4:3 view: in wider views the snow stopped at the 4:3 edges.
- * Each flake is copied 512 to the left and to the right where the copy lands
- * in the view, keeping the snow's density (spreading the flakes instead left
- * them sparse). The stars that fall over the winner at the end of a race are
- * the same kind of sprite (tpage 0x2A, CLUT 0x3E7F, 32x32 texels at u 0xE0
- * v 0xE0, any colour, turning) over the same 0..512 and get the same copies.
+ * -32..544 around the 4:3 view: in wider views the snow stopped at the 4:3
+ * edges. The game's particles (0x80077A.., snow or the stars that fall over
+ * the winner at the end of a race: tpage 0x29-0x2B by track, CLUT 0x3E7F,
+ * 32x32 texels at u 0xE0 v 0xE0, any colour, turning) wrap from one side of
+ * that band to the other, 576 = view width + 64 apart: each one is copied
+ * that far to the left and to the right where the copy lands in the view,
+ * keeping the density (spreading them instead left them sparse) and the
+ * wrap seamless (copies 512 apart made a particle vanish and reappear at the
+ * wide view's sides when it wrapped).
  * The frame's packets lie between the buffer start (0x800A9E34) and the prim
  * cursor; DrawOTag can run more than once per frame, so a second pass resumes
  * after the first one's copies. */
@@ -822,7 +825,7 @@ static void snow_widen(void) {
             if (x < lo) lo = x; if (x > hi) hi = x;
         }
         for (int dir = -1; dir <= 1; dir += 2) {
-            int32_t dx = dir * 512;
+            int32_t dx = dir * (w + 64);
             if (hi + dx < -m || lo + dx > w + m) continue;
             uint32_t q = psx_mod_read_word(PRIM_CURSOR);
             if (!ram_address(q) || q + 40u >= psx_mod_read_word(PRIM_LIMIT)) goto done;
