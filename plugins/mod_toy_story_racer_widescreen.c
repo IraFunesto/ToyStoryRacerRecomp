@@ -585,8 +585,10 @@ static void ui_process(const UiEl *el, int charsel) {
     int32_t ay = counter && s_rz_n ? s_rz_ay : anchor_y(ayc);
     if (counter && !s_rz_n) s_rz_ay = ay;   /* the counter keeps one anchor */
     if (pause) {
-        /* PAUSA: moved down to the bottom-right corner */
-        int32_t dy = 218 - yhi2;
+        /* PAUSA: moved down to the bottom-right corner (38 lines above the
+         * frame's bottom: 256 PAL, 240 NTSC) */
+        const int32_t fh = anchor_y(0x7FFF);
+        int32_t dy = fh - 38 - yhi2;
         static const uint8_t off[4] = { 8, 16, 24, 32 };
         for (int k = 0; k < n; k++) {
             uint32_t cmd = psx_mod_read_word(pk[k] + 4u) >> 24;
@@ -596,7 +598,7 @@ static void ui_process(const UiEl *el, int charsel) {
                 psx_mod_write_half(pk[k] + o + 2u, (uint16_t)((int16_t)psx_mod_read_half(pk[k] + o + 2u) + dy));
             }
         }
-        ay = 256;
+        ay = fh;
     }
     for (int k = 0; k < n; k++) {
         ui_tag(pk[k], edge);
@@ -808,8 +810,10 @@ static void snow_widen(void) {
         if ((w0 >> 24) != 0x2Eu) continue;
         if ((psx_mod_read_word(a) >> 24) != 9u) continue;
         uint32_t w2 = psx_mod_read_word(a + 12u), tp = psx_mod_read_word(a + 20u) >> 16;
-        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && tp == 0x0029u;
-        int star = w2 == 0x3E7FE0E0u && tp == 0x002Au;
+        /* texture pages: the two players' views use 0x28-0x29 / 0x2A, one
+         * player's view the next page (stars 0x2B) */
+        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && (tp & ~1u) == 0x0028u;
+        int star = w2 == 0x3E7FE0E0u && (tp & ~1u) == 0x002Au;
         if (!flake && !star) continue;
         int32_t lo = 0x7FFF, hi = -0x7FFF;
         for (int v = 0; v < 4; v++) {

@@ -369,5 +369,9 @@ PSX_MOD_CONSTRUCTOR(psx_register_tsr_versions_plugin) {
     psx_mod_set_disc_serial_hook(setup_accepts_disc);
 #endif
     psx_mod_set_disc_folder_hook(voices_prepare);
+    /* The whole picture whatever the game's screen position: the American
+     * program's 240 lines (a save from a European version carries its PAL
+     * position) and the European 256 alike. */
+    psx_mod_set_display_full_frame(1);
     (void)psx_mod_register_activation_plugin("toystoryracer.versions", versions_activate);
 }

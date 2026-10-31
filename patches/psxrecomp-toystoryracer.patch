@@ -327,7 +327,7 @@ index 93c8de19..bc9de540 100644
  /* Allocations are fixed during activation. Snapshot allocated bytes, never
   * host pointers; immutable host assets are reconstructed separately. */
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index 471041bd..af5f62e3 100644
+index 471041bd..7d4d63db 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
 @@ -28,6 +28,13 @@ int psx_mod_register_function_entry_plugin(
@@ -344,7 +344,7 @@ index 471041bd..af5f62e3 100644
  /* Active function-entry hook count (0 = none). Hot callers test it before the
   * call, so a run without an active hook pays one load per interpreted entry. */
  extern uint32_t g_psx_mod_function_entry_hooks;
-@@ -39,6 +46,46 @@ int psx_mod_game_started(void);
+@@ -39,6 +46,51 @@ int psx_mod_game_started(void);
   * otherwise capacity must hold the entire file. Active sector mods apply. */
  int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
                             uint32_t* size);
@@ -380,6 +380,11 @@ index 471041bd..af5f62e3 100644
 + * other editions from their own discs). Register it from a constructor. */
 +typedef int (*PSXModDiscSerialHook)(const char* serial);
 +void psx_mod_set_disc_serial_hook(PSXModDiscSerialHook hook);
++/* Present the standard's whole picture from the display area (240 lines
++ * NTSC, 256 PAL; 15-bit, non-interlaced frames) instead of the part of the
++ * programmed range inside the TV's active picture: a game's screen-position
++ * option then no longer crops or stretches it. */
++void psx_mod_set_display_full_frame(int enabled);
 +/* The inserted memory cards (slot 0 = card 1, 1 = card 2): 128-byte sectors
 + * 0..1023 of the card image, as the card itself stores them. Return 1 on
 + * success, 0 for an empty slot or a bad sector. Written sectors reach the
@@ -391,7 +396,7 @@ index 471041bd..af5f62e3 100644
  /* Experimental retained-texture service (currently OpenGL only). IDs are
   * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
   * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
-@@ -54,6 +101,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+@@ -54,6 +106,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
   * blending and destination-mask checks retain per-primitive isolation. Call
   * from activation or an emulation-thread render boundary. */
  void psx_mod_set_texture_bank_batching(int enabled);
@@ -403,7 +408,7 @@ index 471041bd..af5f62e3 100644
  /* A dedicated GPU-DMA packet arena. Only GT3 commands sourced from this
   * allocation interpret C1/C2's otherwise-unused high bytes as a bank ID:
   * id = (C1 >> 24) | ((C2 >> 24) << 8). ID zero uses ordinary VRAM. The rest
-@@ -105,6 +157,9 @@ int32_t psx_mod_widescreen_x_margin(void);
+@@ -105,6 +162,9 @@ int32_t psx_mod_widescreen_x_margin(void);
   * compositor translates it by the live reveal, excluding culling guards.
   * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
  void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
@@ -413,7 +418,7 @@ index 471041bd..af5f62e3 100644
  /* Exclude a known world packet from screen-space backdrop stretching, even
   * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
  void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
-@@ -340,6 +395,19 @@ enum {
+@@ -340,6 +400,19 @@ enum {
  };
  uint32_t psx_mod_render_pass_status(void);
  int psx_mod_set_auto_skip_fmv(int enabled);
@@ -925,7 +930,7 @@ index a75dc88b..7584708a 100644
  }
  
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index b2857352..4f3a59ad 100644
+index b2857352..e6a94ee4 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
 @@ -1562,6 +1562,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
@@ -1010,7 +1015,33 @@ index b2857352..4f3a59ad 100644
  }
  
  void gpu_ws_restore_linked_list_rank(uint32_t rank) {
-@@ -4251,6 +4305,8 @@ static void gp0_exec_textured_quad(void) {
+@@ -2879,6 +2933,11 @@ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
+ 
+ /* Horizontal display range (GP1(06h)) */
+ static uint32_t h_display_x1;
++static int g_psx_display_full_frame;   /* psx_mod_set_display_full_frame */
++
++void psx_mod_set_display_full_frame(int enabled) {
++    g_psx_display_full_frame = enabled != 0;
++}
+ static uint32_t h_display_x2;
+ 
+ /* Vertical display range (GP1(07h)) */
+@@ -3547,6 +3606,13 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
+     PsxDisplayVerticalLayout vertical = psx_display_vertical_layout(
+         video_mode != 0, v_display_y1, v_display_y2);
+     uint32_t h = psx_display_source_height(vertical, 240u);
++    /* Whole frame (psx_mod_set_display_full_frame): the standard's full
++     * picture (240 lines NTSC, 256 PAL) from the display area, wherever the
++     * game's screen-position option moves or shortens its range -- a TV loses
++     * the lines past its picture, a window has room for all of them. */
++    if (g_psx_display_full_frame && !(display_depth & 1u) && !vres &&
++        v_display_y2 > v_display_y1)
++        h = video_mode != 0 ? 256u : 240u;
+     uint32_t screen_h = vertical.range_set ? vertical.canvas_height : h;
+     uint32_t screen_origin_y = vertical.valid ? vertical.canvas_origin_y : 0u;
+     uint32_t screen_source_skip_y = vertical.valid ? vertical.source_skip_y : 0u;
+@@ -4251,6 +4317,8 @@ static void gp0_exec_textured_quad(void) {
      }
  }
  
@@ -1019,7 +1050,7 @@ index b2857352..4f3a59ad 100644
  /* Execute shaded textured triangle (GP0 0x34-0x37) */
  static void gp0_exec_shaded_textured_tri(void) {
      int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
-@@ -4291,9 +4347,13 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4291,9 +4359,13 @@ static void gp0_exec_shaded_textured_tri(void) {
      prepare_precise_triangle(1, 4, 7,
                               vx, vy);
      prepare_texture_triangle(1, 4, 7);
@@ -1034,7 +1065,7 @@ index b2857352..4f3a59ad 100644
              gr_set_precise_triangle(1,
                  (int32_t)((xy[0] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[1] + draw_offset_y) * 65536.0f),
-@@ -4302,12 +4362,27 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4302,12 +4374,27 @@ static void gp0_exec_shaded_textured_tri(void) {
                  (int32_t)((xy[4] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[5] + draw_offset_y) * 65536.0f));
              gr_set_perspective_triangle(1, q[0], q[1], q[2]);
@@ -1062,7 +1093,7 @@ index b2857352..4f3a59ad 100644
      if (host_bank) (void)gl_renderer_select_texture_bank(0);
  }
  
-@@ -5900,11 +5975,13 @@ static void gpu_write_gp0_body(uint32_t val) {
+@@ -5900,11 +5987,13 @@ static void gpu_write_gp0_body(uint32_t val) {
      int word_count = gp0_command_word_count(opcode);
  
      if (word_count == 0) {
