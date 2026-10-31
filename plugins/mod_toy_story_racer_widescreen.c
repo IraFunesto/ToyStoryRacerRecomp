@@ -442,8 +442,11 @@ static int16_t s_ui_pcx, s_ui_pcy;
 static int8_t s_ui_rdx, s_ui_rdy;
 static void ui_process_frame(void);
 static int particle_at(uint32_t p);
+static void particle_touch(void);
 
 static void ui_flush(void) {
+    /* a new frame without particles must not keep its buffer's old ones */
+    particle_touch();
     if (!s_ui_pending) return;
     s_ui_pending = 0;
     uint32_t start = s_ui_start, end = psx_mod_read_word(PRIM_CURSOR);
@@ -808,16 +811,47 @@ static void star_wipe_widen(void) {
  * wide view's sides when it wrapped).
  * Each particle is one sprite of the icon routine 0x8004E28C called from
  * PARTICLE_RA: its packet starts at the prim cursor of that call, recorded
- * by tsr_ui_icon_entry (their texture, CLUT and page differ by track). */
+ * by tsr_ui_icon_entry (their texture, CLUT and page differ by track).
+ * The game builds frames in two packet buffers in turn, and a frame's menu
+ * prompts can be settled while the next frame is being built: one record per
+ * buffer, emptied when a new frame starts in that buffer (its DrawOTag closed
+ * the last one), so neither a frame's own particles are forgotten nor an
+ * older frame's addresses taken for particles. */
 #define PARTICLE_RA   0x80077F98u
 #define MAX_PARTICLES 96
-static uint32_t s_part[MAX_PARTICLES], s_part_fb;
-static int s_npart, s_part_done;
+typedef struct {
+    uint32_t fb, a[MAX_PARTICLES];
+    int n, done, closed;
+} ParticleSet;
+static ParticleSet s_ps[2];
+static uint32_t s_last_dot_fb;   /* buffer of the last DrawOTag */
+
+/* the record of the frame being built in buffer fb: a closed one starts
+ * afresh once the other buffer has been drawn since (a second DrawOTag of
+ * the same frame keeps it) */
+static ParticleSet *particle_set(uint32_t fb) {
+    ParticleSet *s = s_ps[0].fb == fb ? &s_ps[0] : s_ps[1].fb == fb ? &s_ps[1] : NULL;
+    if (!s) {   /* a buffer not seen yet: a free slot, else not the last drawn one */
+        s = s_ps[0].fb == 0u ? &s_ps[0] : s_ps[1].fb == 0u ? &s_ps[1]
+          : s_ps[0].fb == s_last_dot_fb ? &s_ps[1] : &s_ps[0];
+        s->fb = fb; s->n = s->done = 0; s->closed = 0;
+        return s;
+    }
+    if (s->closed && s_last_dot_fb != fb) { s->n = s->done = 0; s->closed = 0; }
+    return s;
+}
+
+static void particle_touch(void) { (void)particle_set(psx_mod_read_word(0x800A9E34u)); }
 
 static void particle_record(void) {
-    uint32_t fb = psx_mod_read_word(0x800A9E34u);
-    if (fb != s_part_fb) { s_part_fb = fb; s_npart = s_part_done = 0; }
-    if (s_npart < MAX_PARTICLES) s_part[s_npart++] = psx_mod_read_word(PRIM_CURSOR);
+    ParticleSet *s = particle_set(psx_mod_read_word(0x800A9E34u));
+    if (s->n < MAX_PARTICLES) s->a[s->n++] = psx_mod_read_word(PRIM_CURSOR);
+}
+
+/* DrawOTag of the frame in buffer fb: the next one there starts afresh */
+static void particle_close(uint32_t fb) {
+    for (int i = 0; i < 2; i++) if (s_ps[i].fb == fb) s_ps[i].closed = 1;
+    s_last_dot_fb = fb;
 }
 
 /* the particle's POLY_FT4 at or just after its recorded start, else 0 */
@@ -828,11 +862,12 @@ static uint32_t particle_packet(uint32_t start, uint32_t cur) {
     return 0u;
 }
 
-/* a packet some particle wrote this frame */
+/* a packet a particle wrote in its buffer's current or last frame (a
+ * closed record still holds that frame until the next one there starts) */
 static int particle_at(uint32_t p) {
-    if (psx_mod_read_word(0x800A9E34u) != s_part_fb) return 0;
-    for (int i = 0; i < s_npart; i++)
-        if (p >= s_part[i] && p < s_part[i] + 64u) return 1;
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < s_ps[k].n; i++)
+            if (p >= s_ps[k].a[i] && p < s_ps[k].a[i] + 64u) return 1;
     return 0;
 }
 
@@ -845,12 +880,12 @@ static void snow_widen(void) {
     if (m <= 0) return;
     uint32_t fb = psx_mod_read_word(0x800A9E34u), cur = psx_mod_read_word(PRIM_CURSOR);
     if (!ram_address(fb) || !ram_address(cur) || cur <= fb || cur - fb > 0x40000u) return;
-    if (fb != s_part_fb) return;   /* no particles this frame */
+    ParticleSet *s = particle_set(fb);
     int32_t w = (int32_t)psx_mod_display_width();
     if (w <= 0) w = 512;
     /* DrawOTag can run more than once per frame: each particle once */
-    for (; s_part_done < s_npart; s_part_done++) {
-        uint32_t a = particle_packet(s_part[s_part_done], cur);
+    for (; s->done < s->n; s->done++) {
+        uint32_t a = particle_packet(s->a[s->done], cur);
         if (a && !particle_widen(a, m, w)) break;
     }
 }
@@ -897,10 +932,7 @@ static void tsr_linked_list_hook(void) {
         if (fb != s_ui_done_fb && menu_screen()) { ui_tags_clear(); s_ui_done_fb = fb; }
     }
     ui_zone_pass();
-    /* a frame without particles forgets the last ones: the game alternates
-     * two packet buffers, and their addresses in the other buffer were taken
-     * for particles in every other frame (menu prompts left unscaled) */
-    if (psx_mod_read_word(0x800A9E34u) != s_part_fb) s_npart = s_part_done = 0;
+    particle_close(psx_mod_read_word(0x800A9E34u));
 }
 
 /* The results screens (race and cup standings, the winner) come from the race
