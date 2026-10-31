@@ -505,6 +505,19 @@ static void ui_process(const UiEl *el, int charsel) {
     uint32_t pk[128];
     int n = ui_collect(start, end, pk, 128);
     if (n <= 0) return;
+    /* the falling stars and snow are drawn while a prompt is still being
+     * recorded (the race-end "CONTINUA" prompt): never part of an element,
+     * or those near it shrank and moved with it */
+    {
+        int m = 0;
+        for (int k = 0; k < n; k++) {
+            uint32_t cmd = psx_mod_read_word(pk[k] + 4u) >> 24, w2 = psx_mod_read_word(pk[k] + 12u);
+            if ((cmd & 0xFCu) == 0x2Cu && (w2 == 0x3E7FE0E0u || w2 == 0x3E7EC080u)) continue;
+            pk[m++] = pk[k];
+        }
+        n = m;
+        if (n <= 0) return;
+    }
     if (el->has_c) {
         /* a prompt part is a few small glyphs around its prompt's centre:
          * whatever the game draws next (the screen transition's star) is
