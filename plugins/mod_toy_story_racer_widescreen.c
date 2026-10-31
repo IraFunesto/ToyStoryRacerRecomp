@@ -810,10 +810,11 @@ static void snow_widen(void) {
         if ((w0 >> 24) != 0x2Eu) continue;
         if ((psx_mod_read_word(a) >> 24) != 9u) continue;
         uint32_t w2 = psx_mod_read_word(a + 12u), tp = psx_mod_read_word(a + 20u) >> 16;
-        /* texture pages: the two players' views use 0x28-0x29 / 0x2A, one
-         * player's view the next page (stars 0x2B) */
-        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && (tp & ~1u) == 0x0028u;
-        int star = w2 == 0x3E7FE0E0u && (tp & ~1u) == 0x002Au;
+        /* the texture page holding them depends on the track and the
+         * players (stars seen on 0x29, 0x2A, 0x2B): told apart by their CLUT
+         * and texture corner only */
+        int flake = w0 == 0x2E808080u && w2 == 0x3E7EC080u && (tp & 0xFFE0u) == 0x0020u;
+        int star = w2 == 0x3E7FE0E0u && (tp & 0xFFE0u) == 0x0020u;
         if (!flake && !star) continue;
         int32_t lo = 0x7FFF, hi = -0x7FFF;
         for (int v = 0; v < 4; v++) {
