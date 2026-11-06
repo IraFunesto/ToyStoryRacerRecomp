@@ -58,7 +58,7 @@
 #define BUFFER_VAR     0x800A9E34u   /* current frame buffer base (double buffer) */
 #define BUFFER0        0x80193518u
 #define FLIP_COUNT     0x800A9DF8u
-#define GAME_STAGE     0x800A96B8u   /* 35 menus, 36 loading, 38 track/race */
+#define PREVIEW_PATH   0x800CCEF4u   /* the track preview's camera path, 0 otherwise */
 
 #define MAX_OBJS     256
 #define MAX_VERTS    256
@@ -2202,7 +2202,10 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     }
     /* The underlay closes hairline cracks between track pieces; on the menu
      * characters (scenery sections there) it grew a fringe of skin texels. */
-    s_underlay_on = g_tsr_racing || rd8(GAME_STAGE) == 38u;
+    /* On the track: the race bar is being drawn, or the preview flight's
+     * camera path is set. (The game stage stays 38 back in the menus after
+     * a race.) */
+    s_underlay_on = g_tsr_racing || rd32(PREVIEW_PATH) != 0u;
     /* A new game frame starts building when the double buffer flips; each
      * view (one per player) has its own OT. */
     int buf = frame_buffer_begin();
