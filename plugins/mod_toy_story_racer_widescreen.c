@@ -104,6 +104,8 @@ static int s_fps50, s_fps50_2p;   /* 50 fps; also in two-player races */
 #define HUD_ROPE_FN     0x80039E30u
 #define HUD_ROPE_END    0x8003A048u
 #define HUD_ROPE_BASE   0x80039E40u   /* addiu s3,zero,base */
+#define HUD_ROPE_BASE2  0x80039E68u   /* addiu s3,zero,base of two-player races
+                                       * (the bar between the views) */
 #define DRAW_SPRITE_FN  0x8004DE64u
 #define PRIM_CURSOR     0x800A9F4Cu   /* next free primitive */
 #define PRIM_LIMIT      0x800A9DF8u   /* end of the current primitive buffer */
@@ -120,11 +122,13 @@ static int ram_address(uint32_t a) {
 }
 
 static int hud_active(void) {
-    return s_hud_percent < 100 && psx_mod_read_byte(SPLIT_SCREEN) == 0u;
+    return s_hud_percent < 100;
 }
 
+/* the bar's base line: the bottom of the screen, or between the two views
+ * (shrunk about that line it stays between them) */
 static int32_t hud_base_y(void) {
-    return (int16_t)psx_mod_read_half(HUD_ROPE_BASE);
+    return (int16_t)psx_mod_read_half(psx_mod_read_byte(SPLIT_SCREEN) ? HUD_ROPE_BASE2 : HUD_ROPE_BASE);
 }
 
 static int32_t scale_round(int32_t v) {
