@@ -1488,11 +1488,10 @@ static void tsr_vblank(void) {
                                         (psx_mod_read_byte(SPLIT_SCREEN) == 0u || s_fps50_2p ||
                                          tsr_native_scene_debug_byte(27u) == 1u)) ? 0xFFFFFFFEu : 0xFFFFFFFFu);
     {
-        /* In a race: the progress bar was drawn recently (one player) or the
-         * split-screen flag is set (two players draw a different bar). */
-        int racing = (s_race_seen &&
-                      s_vblank - s_last_race_vblank <= OVERCLOCK_HOLD_VBLANKS) ||
-                     psx_mod_read_byte(SPLIT_SCREEN) != 0u;
+        /* In a race: the progress bar was drawn recently (one or two
+         * players; the split-screen flag stays set in the menus after a
+         * two-player race, where the menu characters then grew a fringe) */
+        int racing = s_race_seen && s_vblank - s_last_race_vblank <= OVERCLOCK_HOLD_VBLANKS;
         g_tsr_racing = racing;
         /* everywhere (the menus' 3D scenes need it at 50 fps too) */
         uint32_t want = s_overclock_pct;
