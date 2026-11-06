@@ -211,7 +211,7 @@ label = "65%"
 feature = "widescreen"
 id = "cpu_overclock"
 label = "CPU overclock"
-description = "Gives the emulated CPU more time per frame, like DuckStation's CPU overclock. With the native scenery renderer the game needs little: 150% keeps two-player races at full rate, and high values only cost host CPU time (above about 300% the game can even run slow). The higher values are for the original renderer. Active only during races (menus run at the normal 100%). Game speed and music are unchanged."
+description = "Gives the emulated CPU more time per frame, like DuckStation's CPU overclock. The game needs little: 150% keeps two-player races at full rate, and high values only cost host CPU time (above about 300% the game can even run slow). Active only during races (menus run at the normal 100%). Game speed and music are unchanged."
 group = "Display"
 type = "choice"
 default = "150"
@@ -293,26 +293,9 @@ label = "Blend"
 
 [[option]]
 feature = "widescreen"
-id = "native_scenery"
-label = "Native scenery renderer"
-description = "Draws the track scenery on the PC in full precision instead of the PlayStation pipeline: no vertex wobble or texture warping, no near-camera clipping or polygon pool limits, with a real depth buffer (objects behind walls stay hidden). Karts, pick-ups and the HUD still come from the game. OpenGL renderer."
-group = "Display"
-type = "choice"
-default = "on"
-
-[[option.choice]]
-value = "off"
-label = "Off"
-
-[[option.choice]]
-value = "on"
-label = "On"
-
-[[option]]
-feature = "widescreen"
 id = "frame_rate"
 label = "Frame rate in races"
-description = "The game draws 25 frames per second. '50 fps (1 player)' draws a new frame every VBlank in one-player races (the game is time-based, so its speed and the music are unchanged); when a frame needs more time it simply falls back to 25 for that moment. '50 fps (also 2 players)' does the same in two-player races too: it needs a fast PC, best with internal resolution 960 and CPU overclock 150; menus stay at 25. Best with the native scenery renderer."
+description = "The game draws 25 frames per second. '50 fps (1 player)' draws a new frame every VBlank in one-player races (the game is time-based, so its speed and the music are unchanged); when a frame needs more time it simply falls back to 25 for that moment. '50 fps (also 2 players)' does the same in two-player races too: it needs a fast PC, best with internal resolution 960 and CPU overclock 150; menus stay at 25."
 group = "Display"
 type = "choice"
 default = "50"

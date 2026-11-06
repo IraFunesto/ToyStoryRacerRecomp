@@ -1534,7 +1534,7 @@ static void desktop_aspect(unsigned* num, unsigned* den) {
 }
 
 static void tsr_widescreen_activate(void) {
-    char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], native[16], fps[16];
+    char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], fps[16];
     unsigned num = 16u, den = 9u;
     int fit = 1;
 
@@ -1609,18 +1609,17 @@ static void tsr_widescreen_activate(void) {
                          strcmp(music, "original") == 0);
     g_psx_cd_pause_cycles_cap = smooth_music ? CD_PAUSE_FAST_CYCLES : -1;
 
-    int native_scene = psx_mod_option_value(PKG, FEATURE, "native_scenery", native, sizeof native) &&
-                       strcmp(native, "on") == 0;
-    tsr_native_scene_activate(native_scene, 0);
+    /* the native renderer is always on: everything 3D relies on it */
+    tsr_native_scene_activate(1, 0);
 
     /* The power-on logo videos are the game's only videos; the quick-start
      * feature skips them itself (manifest patches), else they play. */
     (void)psx_mod_set_auto_skip_fmv(0);
 
-    fprintf(stdout, "TOY STORY RACER WIDESCREEN PLUGIN ACTIVATED (%s, HUD %d%%, vsync %s, CPU %u%%, pool %s, smoothing %s, music change %s, native scenery %s, %s fps)\n",
+    fprintf(stdout, "TOY STORY RACER WIDESCREEN PLUGIN ACTIVATED (%s, HUD %d%%, vsync %s, CPU %u%%, pool %s, smoothing %s, music change %s, %s fps)\n",
             aspect, s_hud_percent, s_force_vsync ? "forced" : "runtime",
             (unsigned)s_overclock_pct, pool_expanded ? "4600/8MB" : "2300", smoothing ? "blend" : "off",
-            smooth_music ? "smooth" : "original", native_scene ? "on" : "off", s_fps50_2p ? "50 (also 2P)" : s_fps50 ? "50" : "25");
+            smooth_music ? "smooth" : "original", s_fps50_2p ? "50 (also 2P)" : s_fps50 ? "50" : "25");
     s_vblank = 0;
     s_faces_start = 0;
     (void)psx_mod_set_fixed_display_aspect(num, den);

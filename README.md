@@ -34,8 +34,7 @@ package (launcher → Mods) and can be switched off.
 
 On a first start the game is set up the way it is meant to be played:
 widescreen with the native renderer on, the window opening in the shape of
-your monitor, 960-line internal resolution with bilinear filtering, and the
-framework's PGXP package on. Every one of them can be changed in the
+your monitor, 960-line internal resolution with bilinear filtering. Every one of them can be changed in the
 launcher (Settings and Mods); an existing install keeps its own choices.
 
 **Three discs, one game** — the setup takes whichever of your discs you
@@ -108,7 +107,7 @@ your monitor:
   Extended doubles the draw distance, Full (default) also ignores the 4:3
   visibility lists, so nothing pops in at the sides.
 
-**Native scenery renderer** (default on) — all the 3D is drawn by the PC
+**Native scenery renderer** (always on) — all the 3D is drawn by the PC
 instead of the emulated PlayStation GPU: the track scenery, the karts and the
 characters, the menus' 3D scenes and the title logo, and the effects (smoke
 and sparks, shadows, kart aerials, pick-up crates). No wobbling textures or

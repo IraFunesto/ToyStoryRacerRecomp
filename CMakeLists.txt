@@ -49,10 +49,12 @@ psxrecomp_add_game_runtime(psx-runtime
     CODEGEN_SETUP_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/codegen_setup.c"
     # Loads come from extracted files (plugins/tsr_disc_files.c): the CD
     # speed-ups are not needed, and Fast Loading would speed the game itself
-    # up while the music streams.
+    # up while the music streams. PGXP has nothing left to correct: the native
+    # renderer draws all the 3D, the emulated GPU only the 2D.
     EXCLUDE_BUILTIN_MODS
         psx.enhancement.cd-speed
         psx.enhancement.fast-loading
+        psx.enhancement.pgxp
 )
 
 # The PGXP variant (-DPSX_PGXP_VARIANT=ON) stages the same mods/bundled as the
