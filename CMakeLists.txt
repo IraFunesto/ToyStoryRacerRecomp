@@ -88,7 +88,11 @@ target_sources(psx-runtime PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_quick_start.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_versions.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_versions.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_online.c")
+if(WIN32)
+    target_link_libraries(psx-runtime PRIVATE ws2_32 iphlpapi)   # tsr_online.c
+endif()
 if(TARGET psx-runtime-pgxp)
     target_sources(psx-runtime-pgxp PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/plugins/mod_toy_story_racer_widescreen.c"
@@ -96,5 +100,9 @@ if(TARGET psx-runtime-pgxp)
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_disc_files.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_memcard.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_quick_start.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_versions.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_versions.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/tsr_online.c")
+    if(WIN32)
+        target_link_libraries(psx-runtime-pgxp PRIVATE ws2_32 iphlpapi)
+    endif()
 endif()

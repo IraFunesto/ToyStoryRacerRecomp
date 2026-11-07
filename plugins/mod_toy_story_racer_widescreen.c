@@ -121,14 +121,21 @@ static int ram_address(uint32_t a) {
     return a >= 0x10000u && a < 0x200000u;
 }
 
+int tsr_online_local_view(void);
 static int hud_active(void) {
-    return s_hud_percent < 100;
+    return s_hud_percent < 100 || tsr_online_local_view() >= 0;
 }
 
 /* the bar's base line: the bottom of the screen, or between the two views
- * (shrunk about that line it stays between them) */
+ * (shrunk about that line it stays between them). Online each PC shows only
+ * its own player's view full screen: the bar moves down to the one-player
+ * line (s_hud_shift). */
+static int32_t s_hud_shift;
 static int32_t hud_base_y(void) {
-    return (int16_t)psx_mod_read_half(psx_mod_read_byte(SPLIT_SCREEN) ? HUD_ROPE_BASE2 : HUD_ROPE_BASE);
+    const int split = psx_mod_read_byte(SPLIT_SCREEN) != 0u;
+    const int32_t one = (int16_t)psx_mod_read_half(HUD_ROPE_BASE), two = (int16_t)psx_mod_read_half(HUD_ROPE_BASE2);
+    s_hud_shift = split && tsr_online_local_view() >= 0 ? one - two : 0;
+    return split ? two : one;
 }
 
 static int32_t scale_round(int32_t v) {
@@ -138,7 +145,7 @@ static int32_t scale_round(int32_t v) {
 
 /* Edges, not lengths, are scaled so pieces that share an edge stay flush. */
 static int32_t scale_x(int32_t x) { return HUD_CENTRE_X + scale_round(x - HUD_CENTRE_X); }
-static int32_t scale_y(int32_t y, int32_t base) { return base + scale_round(y - base); }
+static int32_t scale_y(int32_t y, int32_t base) { return base + scale_round(y - base) + s_hud_shift; }
 
 /* libgpu AddPrim: link packet p in front of the OT slot. */
 static void add_prim(uint32_t ot, uint32_t p) {
@@ -740,8 +747,10 @@ static void fly_camera_control(void) {
  * packets are complete (a VBlank can arrive in the middle of an element). */
 #define FRAME_START_FN 0x800723A0u
 static void sky_split_flush(void);
+uint32_t g_tsr_game_frames;   /* game frames started (frame rate measurement, debug block +56) */
 static void tsr_frame_start_entry(struct CPUState* cpu, uint32_t address) {
     (void)cpu; (void)address;
+    g_tsr_game_frames++;
     sky_split_flush();
     ui_flush();
     fly_camera_control();
@@ -1532,7 +1541,9 @@ static void desktop_aspect(unsigned* num, unsigned* den) {
 #endif
 }
 
+int g_tsr_widescreen_on;   /* the widescreen feature is on (tsr_online.c compares it with the other PC) */
 static void tsr_widescreen_activate(void) {
+    g_tsr_widescreen_on = 1;
     char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], fps[16];
     unsigned num = 16u, den = 9u;
     int fit = 1;

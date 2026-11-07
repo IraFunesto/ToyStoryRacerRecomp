@@ -471,7 +471,9 @@ static int card_call(struct CPUState* cpu, uint32_t vector, uint32_t function) {
     }
 }
 
+int g_tsr_memcard_on;   /* the instant memory card is on (tsr_online.c compares it with the other PC) */
 static void memcard_activate(void) {
+    g_tsr_memcard_on = 1;
     memset(s_files, 0, sizeof s_files);
     memset(&s_find, 0, sizeof s_find);
     s_new[0] = s_new[1] = 1;

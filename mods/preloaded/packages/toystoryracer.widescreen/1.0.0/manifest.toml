@@ -59,6 +59,13 @@ group = "Display"
 default_enabled = true
 
 [[feature]]
+id = "online"
+name = "Online play"
+description = "Two players on two PCs, each with a full-screen view of their own kart. On the main menu press SELECT: Square hosts (the game waits on the two-player character select), Circle joins (a window lists the games found on this PC's networks - LAN, Radmin, Hamachi - or takes an IP address and port). The host opens port 27450 (TCP and UDP) on the router unless both use a VPN such as Radmin. Both PCs need the same disc version and the same mod options that change the game (frame rate, CPU overclock, track detail, polygon pool...)."
+group = "Fixes"
+default_enabled = true
+
+[[feature]]
 id = "track-data-fix"
 name = "Track data fix"
 description = "Repairs the track data of disc dumps with read errors: about 45 misread values in ten track files break textures and geometry on Skate Park, Pier, Car Lot, Cinema and Neighbourhood. Changes nothing on a clean dump."
@@ -349,6 +356,10 @@ label = "Lower"
 [[plugin]]
 feature = "version"
 id = "toystoryracer.versions"
+
+[[plugin]]
+feature = "online"
+id = "toystoryracer.online"
 
 [[plugin]]
 feature = "widescreen"

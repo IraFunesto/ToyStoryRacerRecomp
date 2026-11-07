@@ -165,6 +165,46 @@ VSync on high-refresh monitors.
 Plus everything psxrecomp provides: high internal resolution, texture
 filtering, save states, controller rumble.
 
+**Online play (experimental)** — two players on two PCs, each with a
+full-screen view of their own kart (*Online play*, Fixes group, on by
+default):
+- On the main menu press **SELECT**: **Square** hosts (the game waits on the
+  two-player character select), **Circle** joins: a window lists the games
+  found on your PC's networks (LAN, Radmin, Hamachi...) or takes an IP
+  address and port. Then the two-player character and track select, as in a
+  local two-player game, with all the tracks.
+- The host opens port **27450, TCP and UDP**, on the router, unless both
+  players use a VPN such as Radmin VPN.
+- Both PCs need the **same disc version** (e.g. both USA) and the same mod
+  options that change the game (frame rate, CPU overclock, track detail,
+  polygon pool, music change, widescreen, instant loading, instant memory
+  card); the connection is refused with the name of the option that
+  differs. Picture options (resolution, aspect, HUD size...) may differ.
+- **Needs a reasonably fast PC on both sides.** The two games advance
+  together, so the slower PC sets the pace for both: if one of them cannot
+  run a two-player race at full speed, both slow down. A two-player race at
+  60 fps (NTSC, *50 fps (also 2 players)*) needs a recent CPU; an older one
+  (e.g. an i7-3770) drops to about 45 fps in heavy parts. *Frame rate in
+  races* = *50 fps (1 player)* on both PCs (two-player races at the game's
+  original rate) halves the load.
+- A log of the connection (`tsr_online.log`, next to the game) records
+  every 10 s the round trip, the waits and each PC's time per frame.
+- How it works: input lockstep. The host sends its game state once when the
+  other player joins (both PCs then load the same state); after that only
+  the buttons travel, every frame, by UDP with the last 16 frames in each
+  packet (and a TCP copy), a few frames ahead, the margin adapting to the
+  round trip and to lost packets. A checksum of the game's memory is
+  compared every two seconds.
+
+**Faster frames** — the game's frame wait loop is now skipped by the
+runtime's idle skip instead of being run at the overclocked rate: about a
+third less CPU work per frame, the same on every PC.
+
+**Another disc in the launcher** — picking the disc of another version in a
+game's launcher (*Browse For Disc*) now starts that version, or opens the
+disc setup to add it, instead of reporting a failed verification.
+
+
 ## Disc dumps
 
 The American (SLUS-01214) and the European Fr, De (SLES-03397) discs are
@@ -213,7 +253,8 @@ The game needs a few additions to psxrecomp (a linked-list hook for the menu
 prompts, disc file overrides, CD/XA loading, the disc as files, function and
 kernel-call hooks for the instant loading and memory card, a disc-folder hook
 and a disc-serial hook for the three-disc setup, GPU packet safety,
-CPU overclock and more). They ship inside the release zip and are kept here as
+CPU overclock, and for the online play a per-frame pad hook, save state
+transfer, hidden/remapped drawing areas and a foreign-disc hook, and more). They ship inside the release zip and are kept here as
 `patches/psxrecomp-toystoryracer.patch` against the pinned `psxrecomp`
 submodule commit.
 

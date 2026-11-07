@@ -59,6 +59,12 @@ strict = true
 window_title = "Disney-Pixar Toy Story Racer (Europe) (Es,It,Nl) Recompiled"
 memcard_dir = "saves"
 overlay_cache = true
+# Idle skip: when the game has finished its frame and polls the VBlank
+# counter (the frame wait loop, 0x8007292C), the runtime jumps to the VBlank
+# instead of running the poll at the overclocked rate -- the same result, with
+# about a third less work per frame for the PC (and the same on every PC, so
+# the online play stays in step).
+idle_skip = true
 # The disc as extracted files in tsr_data (project root, beside saves/): made
 # from the selected image at the first start (verified sector by sector), then
 # every read -- boot, loads, music, voices, videos, Generate -- comes from the

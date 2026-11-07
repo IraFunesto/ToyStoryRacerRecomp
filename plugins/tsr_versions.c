@@ -364,9 +364,141 @@ static int setup_accepts_disc(const char* serial) {
 }
 #endif
 
+#if defined(PSX_HAS_GAME_DISPATCH) && defined(_WIN32)
+/* ---- another version's disc picked in this game's launcher -------------------- */
+
+/* a game's remembered disc (its build folder): disc.cfg, rom.cfg and the
+ * [disc] path of its settings.toml; path NULL forgets disc.cfg/rom.cfg */
+static void set_disc_pick(const char* dir, const char* path) {
+    static const char* const files[] = { "disc.cfg", "rom.cfg" };
+    char file[PATH_CAP];
+    for (int i = 0; i < 2; ++i) {
+        join(file, dir, files[i]);
+        if (path) write_text(file, path);
+        else remove(file);
+    }
+    join(file, dir, "settings.toml");
+    char* settings = read_text(file, NULL);
+    if (!settings) return;
+    char* section = strstr(settings, "[disc]");
+    char* line = section ? strstr(section, "\npath") : NULL;
+    char* next = section ? strstr(section + 6, "\n[") : NULL;
+    if (line && (!next || line < next)) {
+        char* end = strchr(line + 1, '\n');
+        char value[PATH_CAP];
+        snprintf(value, sizeof value, "%s", path ? path : "");
+        for (char* p = value; *p; ++p) if (*p == '\\') *p = '/';
+        size_t cap = strlen(settings) + strlen(value) + 32u;
+        char* out = (char*)malloc(cap);
+        if (out) {
+            snprintf(out, cap, "%.*s\npath = \"%s\"%s", (int)(line - settings), settings, value, end ? end : "\n");
+            write_text(file, out);
+            free(out);
+        }
+    }
+    free(settings);
+}
+
+/* a game's mod options: the Version feature's standard forced to ntsc/pal
+ * (the options copied from another version would switch straight back) */
+static void set_standard(const char* state_path, int ntsc) {
+    const char* want = ntsc ? "standard = \"ntsc\"" : "standard = \"pal\"";
+    char* state = read_text(state_path, NULL);
+    if (!state) state = strdup("format_version = 2\n");
+    if (!state) return;
+    size_t cap = strlen(state) + 512u;
+    char* out = (char*)malloc(cap);
+    if (!out) { free(state); return; }
+    /* drop any standard line, then put ours under the version feature */
+    size_t len = 0;
+    for (char* line = state; *line;) {
+        char* end = strchr(line, '\n');
+        size_t n = end ? (size_t)(end - line) + 1u : strlen(line);
+        if (strncmp(line, "standard = ", 11) != 0) { memcpy(out + len, line, n); len += n; }
+        line += n;
+    }
+    out[len] = '\0';
+    char* feature = strstr(out, "package_id = \"toystoryracer.widescreen\"\nid = \"version\"");
+    if (feature) {
+        char* next = strstr(feature, "\n[[");
+        char* values = strstr(feature, "[feature.values]\n");
+        if (values && (!next || values < next)) {
+            char* at = values + strlen("[feature.values]\n");
+            char tail[65536];
+            snprintf(tail, sizeof tail, "%s", at);
+            snprintf(at, cap - (size_t)(at - out), "%s\n%s", want, tail);
+        } else {
+            char* at = next ? next + 1 : out + strlen(out);
+            char tail[65536];
+            snprintf(tail, sizeof tail, "%s", at);
+            snprintf(at, cap - (size_t)(at - out), "[feature.values]\n%s\n%s", want, tail);
+        }
+    } else {
+        size_t used = strlen(out);
+        if (used && out[used - 1] != '\n') out[used++] = '\n';
+        snprintf(out + used, cap - used, "%s\n[[feature]]\npackage_id = \"toystoryracer.widescreen\"\nid = \"version\"\n"
+                 "enabled = true\n[feature.values]\n%s\n",
+                 strstr(out, "id = \"toystoryracer.widescreen\"") ? "" :
+                 "\n[[package]]\nid = \"toystoryracer.widescreen\"\n", want);
+    }
+    write_text(state_path, out);
+    free(out);
+    free(state);
+}
+
+/* The player picked the disc of another version of the game: that version
+ * takes it -- its game when it is built, else the setup, which builds it. */
+static int disc_foreign(const char* serial, const char* disc_path) {
+    find_install();
+    if (s_self < 0) return 0;
+    int target = -1;
+    for (int v = 0; v < NVERSIONS && target < 0; ++v)
+        if (!strcmp(serial, VERSIONS[v].serial)) target = v;
+    if (target < 0 || target == s_self) return 0;
+    char self_exe[PATH_CAP], from_dir[PATH_CAP], own_root[PATH_CAP], own_disc[PATH_CAP];
+    if (!GetModuleFileNameA(NULL, self_exe, sizeof self_exe)) return 0;
+    for (char* p = self_exe; *p; ++p) if (*p == '\\') *p = '/';
+    snprintf(from_dir, sizeof from_dir, "%s", self_exe);
+    *strrchr(from_dir, '/') = '\0';
+    /* this game keeps its own disc (else it would hand over at every start) */
+    version_root(s_self, own_root);
+    join(own_disc, own_root, "tsr_data/disc.psxdisc");
+    set_disc_pick(from_dir, file_exists(own_disc) ? own_disc : NULL);
+
+    fprintf(stdout, "TSR VERSIONS: %s picked in %s's launcher (%s)\n", serial, VERSIONS[s_self].serial, disc_path);
+    fflush(stdout);
+    char exe[PATH_CAP];
+    if (!version_exe(target, exe)) {
+        char root_dir[PATH_CAP];
+        snprintf(root_dir, sizeof root_dir, "%s", s_root);
+        set_disc_pick(root_dir, disc_path);   /* the setup starts with it, when it reads it */
+        open_setup("a disc of another version");
+        return 0;
+    }
+    char to_dir[PATH_CAP], to_root[PATH_CAP], state[PATH_CAP], choice[PATH_CAP], cmd[PATH_CAP * 2];
+    snprintf(to_dir, sizeof to_dir, "%s", exe);
+    *strrchr(to_dir, '/') = '\0';
+    version_root(target, to_root);
+    tss_sync_settings(from_dir, to_dir);
+    join(state, to_dir, "mods/state.toml");
+    set_standard(state, VERSIONS[target].ntsc);
+    set_disc_pick(to_dir, disc_path);
+    join(choice, s_root, "tsr_version.txt");
+    write_text(choice, VERSIONS[target].dir[0] ? VERSIONS[target].dir : ".");
+    snprintf(cmd, sizeof cmd, "\"%s\" --launcher", exe);
+    SetEnvironmentVariableA("TOYSTORYRACERRECOMP_PROJECT_ROOT", to_root);
+    fprintf(stdout, "TSR VERSIONS: %s -> %s with the disc picked (%s)\n", VERSIONS[s_self].serial, VERSIONS[target].serial, exe);
+    fflush(stdout);
+    if (start(cmd, to_root)) ExitProcess(0);
+    return 0;
+}
+#endif
+
 PSX_MOD_CONSTRUCTOR(psx_register_tsr_versions_plugin) {
 #if !defined(PSX_HAS_GAME_DISPATCH)
     psx_mod_set_disc_serial_hook(setup_accepts_disc);
+#elif defined(_WIN32)
+    psx_mod_set_disc_foreign_hook(disc_foreign);
 #endif
     psx_mod_set_disc_folder_hook(voices_prepare);
     /* The whole picture whatever the game's screen position: the American

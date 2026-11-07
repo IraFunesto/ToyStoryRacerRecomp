@@ -220,7 +220,9 @@ static void sync_entry(struct CPUState* cpu, uint32_t address) {
  * late); the sectors still arrive at the drive's rate. */
 extern int g_psx_cd_fast_stream_start;
 
+int g_tsr_files_on;   /* instant loading is on (tsr_online.c compares it with the other PC) */
 static void loading_activate(void) {
+    g_tsr_files_on = 1;
     char lang[16];
     s_nfound = 0;
     s_pos_valid = s_read_done = 0;

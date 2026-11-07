@@ -2157,6 +2157,7 @@ static void model_draw_impl(struct CPUState *cpu, uint32_t address) {
  * rules call by call, so it draws what the game would, and takes the
  * sections it draws out of the game's list.
  */
+int tsr_online_local_view(void);   /* tsr_online.c */
 #define AREA_TABLE    0x800B4D70u
 #define AREA_MODE     0x800A9D48u
 #define CUR_AREA_TBL  0x800A9CACu
@@ -2263,6 +2264,12 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     int by_area = rd32(AREA_MODE) == 1u;
     int cur_area = (int16_t)rd16(CUR_AREA_TBL + 2u * rd8(CUR_AREA_IDX));
     int view = (int8_t)rd8(VIEW_INDEX);
+    /* Online, each PC shows one player's half of the split screen: the
+     * other half's sections are taken out of the game's list as usual (the
+     * game's memory stays the same on both PCs) but not drawn. The half is
+     * the view's centre: above the middle the host's, below the other's. */
+    const int local_view = tsr_online_local_view();
+    const int hidden = local_view >= 0 && (c.ofy < 120.0f ? 0 : 1) != local_view;
     uint32_t kept = 0, drawn = 0;
     for (uint32_t i = 0; i < count && i < 4096u; i++) {
         uint32_t p = rd32(list + i * 4u);
@@ -2297,8 +2304,15 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
              * game's own x rect tests are off in widescreen
              * (branch_keep_sites); do the same and keep only y. */
             if (psx_mod_widescreen_x_margin() > 0) { c.rx0 = -1e30f; c.rx1 = 1e30f; }
+            /* Online, each PC shows one view of the split screen full
+             * screen: its doorway rects, clipped by the game to the
+             * screen's rows 0..256, open past those rows too. */
+            if (tsr_online_local_view() >= 0) {
+                if (c.ry0 <= 0.0f) c.ry0 = -1e30f;
+                if (c.ry1 >= 240.0f) c.ry1 = 1e30f;   /* 256 PAL, 240 NTSC */
+            }
         }
-        emit_item(&c, &s_items[item]);
+        if (!hidden) emit_item(&c, &s_items[item]);
         drawn++;
         if (view >= 0 && view < 2 && idx < MAX_SECTIONS) {
             s_held_frame[view][idx] = frame;
@@ -2316,7 +2330,7 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
             if (s_held_list[view][k] != list || f == 0u || f == frame || frame - f > VIS_HOLD) continue;
             int item = s_sec_item[k];
             if (item < 0 || (s_no_sprites && s_items[item].kind)) continue;
-            emit_item(&c, &s_items[item]);
+            if (!hidden) emit_item(&c, &s_items[item]);
             drawn++;
         }
     }
@@ -3370,8 +3384,25 @@ unsigned tsr_native_scene_debug_byte(unsigned off) {
     return s_debug_mode_addr ? rd8(s_debug_mode_addr + off) : 0u;
 }
 
+extern uint32_t g_tsr_game_frames;   /* mod_toy_story_racer_widescreen.c */
 void tsr_native_scene_debug_vblank(void) {
+    {   /* test: the native renderers' time, every 600 VBlanks (TSR_PERFLOG) */
+        static double s_acc_scene, s_acc_model;
+        static unsigned s_acc_n;
+        static int s_on = -1;
+        if (s_on < 0) { const char* v = getenv("TSR_PERFLOG"); s_on = v && v[0]; }
+        if (s_on) {
+            s_acc_scene += s_us_scene; s_acc_model += s_us_model;
+            if (++s_acc_n == 600u) {
+                fprintf(stdout, "TSR PERF: native scenery %.2f ms/VBlank, models etc. %.2f ms/VBlank\n",
+                        s_acc_scene / 600000.0, s_acc_model / 600000.0);
+                fflush(stdout);
+                s_acc_scene = s_acc_model = 0.0; s_acc_n = 0;
+            }
+        }
+    }
     if (!s_debug_mode_addr) return;
+    psx_mod_write_word(s_debug_mode_addr + 56u, g_tsr_game_frames);
     psx_mod_write_word(s_debug_mode_addr + 28u, s_vb_tris);
     psx_mod_write_word(s_debug_mode_addr + 32u, (uint32_t)s_us_scene);
     psx_mod_write_word(s_debug_mode_addr + 36u, (uint32_t)s_us_model);

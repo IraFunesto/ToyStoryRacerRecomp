@@ -46,6 +46,8 @@ VARIANTS = {
             0x80036188: 0x80035FE8, 0x80036218: 0x8003606C, 0x800362C8: 0x8003611C,
             0x8003635C: 0x800361AC, 0x8003640C: 0x8003625C, 0x800364A4: 0x800362EC,
             0x80036554: 0x8003639C, 0x800365EC: 0x8003642C, 0x800366A0: 0x800364DC,
+            # the "1 PLAYER" row of the six languages' table (online menu)
+            0x8009DF00: 0x8009D4F4,
         },
         # code with no twin: a value no return address can have (ra checks)
         'no_twin': {0x8003D494},
