@@ -1509,6 +1509,21 @@ static void tsr_vblank(void) {
     }
     /* Re-assert periodically: the runtime resets the interval whenever the
      * window changes display or the panel refresh changes. */
+    /* Online play: no vsync. The two games advance together; a swap that
+     * waits for the panel refresh turns a frame finished just after it into
+     * a whole refresh lost (33 ms on a 60 Hz panel, both PCs slowed). The
+     * runtime's deadline pacer still holds the speed. */
+    {
+        extern int tsr_online_status(void);
+        static int s_online_was;
+        const int online = tsr_online_status() == 4;   /* TSR_ONLINE_PLAYING */
+        if (online && (!s_online_was || s_vblank % VSYNC_REASSERT_VBLANKS == 1u))
+            gl_renderer_set_swap_interval(0);
+        else if (!online && s_online_was)
+            gl_renderer_set_swap_interval(1);   /* back to synced (re-asserted below when forced) */
+        s_online_was = online;
+        if (online) return;
+    }
     if (s_force_vsync && s_vblank % VSYNC_REASSERT_VBLANKS == 1u)
         gl_renderer_set_swap_interval(1);
 }
