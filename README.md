@@ -189,8 +189,8 @@ default):
   for both players' buttons: your buttons act a few frames late (5 frames,
   about 83 ms, at a 60 ms round trip).
 - The two games advance together, so the slower PC sets the pace for both.
-  The game is now light enough for 60 fps two-player races on older CPUs
-  (tested with an i7-3770). Live vsync is off during online play: a frame
+  The game is now much lighter than in 0.3.0 (rollback tested online with
+  an i7-4790K on the other side: 60 fps on both PCs). Live vsync is off during online play: a frame
   that just missed the screen's refresh no longer costs a whole refresh.
 - A log of the connection (`tsr_online.log`, next to the game) records
   every 10 s the round trip, the waits and each PC's time per frame.
