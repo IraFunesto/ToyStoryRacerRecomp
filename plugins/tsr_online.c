@@ -1,4 +1,5 @@
 #include <stdarg.h>
+#include "psx_modrb.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,7 @@
 #define CONNECT_MS     15000         /* join: give up when the host does not answer */
 #define MAGIC          0x52535354u   /* "TSSR" */
 #define BEACON_MAGIC   0x42535354u   /* "TSSB" */
-#define VERSION        4u
+#define VERSION        7u
 
 enum { ROLE_NONE, ROLE_HOST, ROLE_JOIN };
 enum { ST_OFF, ST_WAIT, ST_PING, ST_SAVE, ST_SEND, ST_RELOAD, ST_LOAD, ST_PLAY, ST_DEAD };
@@ -80,6 +81,22 @@ static int s_req_port;
 static uint32_t s_frame;             /* lockstep frame */
 static PSXModPad s_local[RING], s_remote[RING];
 static uint32_t s_remote_have[RING]; /* frame number + 1 stored at each slot */
+/* Rollback play (TSR_ONLINE_RB on both PCs): this PC plays each frame at
+ * once, with the other player's buttons when they are here and a guess (the
+ * last ones known) when they are not; when the real ones arrive and differ,
+ * the machine goes back to that frame (psx_modrb) and replays up to now. */
+#define RB_WINDOW      10   /* frames this PC may run past the other's last confirmed buttons */
+#define RB_LOCAL_DELAY 1    /* frames this PC's own buttons are late (so most arrive in time) */
+static int s_rb;                       /* rollback play is on */
+static uint32_t s_rb_confirmed;        /* the frames below were played with the real buttons */
+static PSXModPad s_used[RING];         /* the other player's buttons each frame was played with */
+static uint32_t s_used_tag[RING];      /* frame + 1 */
+static PSXModPad s_last_remote;        /* the newest real buttons known (the guess) */
+static uint32_t s_last_remote_frame;
+static uint32_t s_remote_at[RING];     /* test (TSR_ONLINE_LAG ms): when a frame's buttons count as arrived */
+static uint32_t s_rb_rollbacks, s_rb_deepest, s_rb_stalls, s_rb_guessed, s_rb_slowed;
+static float s_rb_ahead_avg, s_rb_peer_ahead;   /* frames past the confirmed ones: here, on the other PC */
+static uint32_t s_rbc_mine[8], s_rbc_mine_f[8], s_rbc_theirs[8], s_rbc_theirs_f[8], s_rbc_sent;
 static uint32_t s_check_frame, s_check_mine, s_check_theirs;
 static int s_check_mine_ok, s_check_theirs_ok;
 static uint32_t s_crc, s_crc_next, s_crc_frame;   /* the check in progress (ram_checksum_part) */
@@ -121,6 +138,14 @@ static size_t s_rx_len, s_rx_cap;
 static int env_on(const char* name) {   /* set and not empty */
     const char* v = getenv(name);
     return v && v[0];
+}
+
+/* rollback play chosen (mod option; TSR_ONLINE_RB=1/0 overrides, for tests) */
+static int rb_wanted(void) {
+    const char* e = getenv("TSR_ONLINE_RB");
+    char v[16];
+    if (e && e[0]) return e[0] != '0';
+    return psx_mod_option_value("toystoryracer.widescreen", "online", "netcode", v, sizeof v) && strcmp(v, "rollback") == 0;
 }
 
 static void say(const char* fmt, ...) {
@@ -223,6 +248,7 @@ static void close_all(int failed, const char* why) {
     close_sock(&s_beacon);
     close_sock(&s_udp);
     s_udp_peer_ok = 0;
+    psx_modrb_disable();
     s_rx_len = 0;
     s_failed = failed;
     s_state = ST_DEAD;
@@ -410,8 +436,8 @@ static void game_settings(char* out, size_t cap) {
         { "TRACK DETAIL", "track_detail" }, { "POLYGON POOL", "polygon_pool" },
         { "MUSIC CHANGE", "music_change" },
     };
-    size_t n = (size_t)snprintf(out, cap, "WIDESCREEN=%d;INSTANT LOADING=%d;INSTANT MEMORY CARD=%d;",
-                                g_tsr_widescreen_on, g_tsr_files_on, g_tsr_memcard_on);
+    size_t n = (size_t)snprintf(out, cap, "WIDESCREEN=%d;INSTANT LOADING=%d;INSTANT MEMORY CARD=%d;ROLLBACK=%d;",
+                                g_tsr_widescreen_on, g_tsr_files_on, g_tsr_memcard_on, rb_wanted());
     for (size_t i = 0; i < sizeof opts / sizeof opts[0] && n < cap; ++i) {
         char v[32] = "-";
         if (!psx_mod_option_value("toystoryracer.widescreen", "widescreen", opts[i].id, v, sizeof v)) snprintf(v, sizeof v, "-");
@@ -435,6 +461,8 @@ static void connected(void) {
     s_pings_sent = s_pings_back = 0;
     s_rtt_max = 0;
     s_crc_next = 0;   /* no check left over from an earlier session */
+    s_rb = rb_wanted();
+    s_rb_confirmed = 0;
     s_last_sent = 0;
     s_rtt_est = 0.0f;
     s_loss_bonus = s_peer_bonus = 0;
@@ -528,7 +556,7 @@ static void ram_checksum_part(void) {
         if (a == 0x800AC89Cu || a == 0x800A9DB0u || (a >= 0x800DE140u && a < 0x800DE540u))
             continue;   /* timer readings (the file loads' times, a count or two apart
                          * on the two PCs), not used by the race */
-        if (a == 0x800A7F30u || a == 0x800A7F50u || a == 0x800A7F54u)
+        if (a == 0x800A7F30u || a == 0x800A7F50u || a == 0x800A7F54u || (a >= 0x800A7E20u && a < 0x800A7E40u))
             continue;   /* the CD library's read state (0x8008C39C, 0x8008DC0C): a step
                          * apart while the disc streams, as the stream's buffers */
         if ((a >= 0x800D9000u && a < 0x800DB000u) || a == 0x800A6ED8u || a == 0x800A6EDCu)
@@ -539,6 +567,50 @@ static void ram_checksum_part(void) {
     }
     s_crc = crc;
     s_crc_next = end < CHECK_END ? end : 0u;
+}
+
+/* the other player's buttons for a frame, as they arrive (twice: UDP and TCP) */
+static void remote_store(uint32_t frame, const PSXModPad* pad) {
+    static int s_lag = -1;
+    if (s_lag < 0) { const char* v = getenv("TSR_ONLINE_LAG"); s_lag = v && v[0] ? atoi(v) : 0; }
+    if (s_remote_have[frame % RING] == frame + 1) return;   /* the first copy counts */
+    s_remote[frame % RING] = *pad;
+    s_remote_have[frame % RING] = frame + 1;
+    s_remote_at[frame % RING] = GetTickCount() + (uint32_t)s_lag;
+}
+
+static int remote_ready(uint32_t frame) {
+    return s_remote_have[frame % RING] == frame + 1 &&
+           (int32_t)(GetTickCount() - s_remote_at[frame % RING]) >= 0;
+}
+
+/* The checked memory of the last two checks, kept so that a mismatch can be
+ * written out (online_desync_<role>_<frame>.bin, once a session) and the two
+ * PCs' files compared: by the time the other PC's checksum arrives the game
+ * has moved on. */
+#define RB_KEEP_WORDS ((0x80200000u - 0x80010000u) / 4u)
+static uint32_t* s_rb_keep[2];
+static uint32_t s_rb_keep_f[2];
+static int s_rb_dumped;
+
+static void rb_check_compare(uint32_t frame) {
+    const uint32_t i = (frame / CHECK_EVERY) % 8u;
+    if (s_rbc_mine_f[i] != frame || s_rbc_theirs_f[i] != frame || frame > s_rbc_sent) return;
+    if (s_rbc_mine[i] != s_rbc_theirs[i]) {
+        fprintf(stdout, "TSR ONLINE: DESYNC at frame %u (mine %08X, theirs %08X)\n", frame, s_rbc_mine[i], s_rbc_theirs[i]);
+        fflush(stdout);
+        const uint32_t k = (frame / CHECK_EVERY) & 1u;
+        if (!s_rb_dumped && s_rb_keep[k] && s_rb_keep_f[k] == frame) {
+            char path[96];
+            snprintf(path, sizeof path, "online_desync_%s_%u.bin", s_role == ROLE_HOST ? "host" : "join", frame);
+            FILE* df = fopen(path, "wb");
+            if (df) { fwrite(s_rb_keep[k], 4, RB_KEEP_WORDS, df); fclose(df); s_rb_dumped = 1; }
+            say("the two games differ at frame %u: memory written to %s", frame, path);
+        }
+    } else if ((frame / CHECK_EVERY) % 10 == 0) {
+        say("frame %u in step", frame);
+    }
+    s_rbc_theirs_f[i] = 0;
 }
 
 static void check_compare(void) {
@@ -555,13 +627,17 @@ static int handle_message(uint32_t type, const uint8_t* body, uint32_t len) {
     if (type == MSG_PAD && len == sizeof(PadMsg)) {
         PadMsg m;
         memcpy(&m, body, sizeof m);
-        if (m.frame >= s_frame && m.frame < s_frame + RING - 1 && !env_on("TSR_ONLINE_NOTCPPADS")) {
-            s_remote[m.frame % RING] = m.pad;
-            s_remote_have[m.frame % RING] = m.frame + 1;
-        }
+        if (m.frame >= (s_rb ? s_rb_confirmed : s_frame) && m.frame < s_frame + RING - RB_WINDOW - 2 && !env_on("TSR_ONLINE_NOTCPPADS"))
+            remote_store(m.frame, &m.pad);
     } else if (type == MSG_CHECK && len == 8) {
         uint32_t f, c;
         memcpy(&f, body, 4); memcpy(&c, body + 4, 4);
+        if (s_rb) {
+            s_rbc_theirs[(f / CHECK_EVERY) % 8u] = c;
+            s_rbc_theirs_f[(f / CHECK_EVERY) % 8u] = f;
+            rb_check_compare(f);
+            return 1;
+        }
         if (f == s_check_frame || !s_check_mine_ok) { s_check_frame = f; s_check_theirs = c; s_check_theirs_ok = 1; }
         check_compare();
     } else if (type == MSG_HELLO && len == 12) {
@@ -649,6 +725,7 @@ static int handle_messages(void) {
 #define RA_LBL_LEFT   0x800365ECu
 #define RA_GLY_LEFT   0x800366A0u
 #define BTN_SELECT    0x0001u
+#define BTN_START     0x0008u
 #define BTN_TRIANGLE  0x1000u
 #define BTN_CIRCLE    0x2000u
 #define BTN_CROSS     0x4000u
@@ -1043,7 +1120,9 @@ static void udp_send(void) {
     u.sent_ms = GetTickCount();
     u.echo_ms = s_peer_ms;
     u.hold_ms = s_peer_ms ? GetTickCount() - s_peer_ms_at : 0;
-    u.ask_lead = (uint32_t)s_loss_bonus;
+    /* rollback play: how far this PC runs past the confirmed frames (x16),
+     * so the one further ahead can let the other catch up */
+    u.ask_lead = s_rb ? (0x80000000u | (uint32_t)(s_rb_ahead_avg * 16.0f)) : (uint32_t)s_loss_bonus;
     for (int i = 0; i < UDP_FRAMES; ++i) {
         const uint32_t fr = s_last_sent - (uint32_t)(UDP_FRAMES - 1 - i);
         if ((int32_t)fr >= 0) u.pad[i] = s_local[fr % RING];
@@ -1073,7 +1152,8 @@ static void udp_pump(void) {
             else s_udp_peer.sin_port = from.sin_port;
         }
         s_stat_udp++;
-        if (u.ask_lead <= 8u) s_peer_bonus = (int)u.ask_lead;
+        if (u.ask_lead & 0x80000000u) s_rb_peer_ahead = (float)(u.ask_lead & 0xFFFFu) / 16.0f;
+        else if (u.ask_lead <= 8u) s_peer_bonus = (int)u.ask_lead;
         if (u.echo_ms) {   /* a round trip: now - our time - the time it waited there */
             const uint32_t rtt = GetTickCount() - u.echo_ms - u.hold_ms;
             if (rtt < 5000u && (float)rtt > s_rtt_est) s_rtt_est = (float)rtt;
@@ -1081,9 +1161,8 @@ static void udp_pump(void) {
         if (u.sent_ms - s_peer_ms < 0x80000000u || !s_peer_ms) { s_peer_ms = u.sent_ms; s_peer_ms_at = GetTickCount(); }
         for (int i = 0; i < UDP_FRAMES; ++i) {
             const uint32_t fr = u.newest - (uint32_t)(UDP_FRAMES - 1 - i);
-            if ((int32_t)fr < 0 || fr < s_frame || fr >= s_frame + RING - 1) continue;
-            s_remote[fr % RING] = u.pad[i];
-            s_remote_have[fr % RING] = fr + 1;
+            if ((int32_t)fr < 0 || fr < (s_rb ? s_rb_confirmed : s_frame) || fr >= s_frame + RING - RB_WINDOW - 2) continue;
+            remote_store(fr, &u.pad[i]);
         }
     }
 }
@@ -1138,28 +1217,306 @@ static void neutral(PSXModPad* p) {
     p->analog = 0; p->connected = 1;
 }
 
-static void online_pads(PSXModPad pads[2]) {
-#if defined(_WIN32)
-    {   /* tests: start from a save state file (TSR_BOOTSTATE), hold buttons (TSR_HOLD, hex) */
-        static unsigned s_boot_frames;
-        static int s_boot_done;
-        const char* bs = getenv("TSR_BOOTSTATE");
-        if (bs && bs[0] && !s_boot_done && ++s_boot_frames == 400u) {
-            s_boot_done = 1;
-            FILE* f = fopen(bs, "rb");
-            if (f) {
-                fseek(f, 0, SEEK_END);
-                long n = ftell(f);
-                fseek(f, 0, SEEK_SET);
-                void* d = n > 0 ? malloc((size_t)n) : NULL;
-                if (d && fread(d, 1, (size_t)n, f) == (size_t)n)
-                    fprintf(stdout, "TSR TEST: state %s %s\n", bs, psx_mod_state_load(d, (size_t)n) ? "loading" : "refused");
-                free(d);
-                fclose(f);
+/* the machine went back: tick T holds the frames below T, frame T is next */
+static void rb_loaded(uint32_t tick) {
+    extern void tsr_native_scene_on_rollback(void);
+    s_frame = tick;
+    tsr_native_scene_on_rollback();
+}
+
+static int pad_same(const PSXModPad* a, const PSXModPad* b) {
+    return a->buttons == b->buttons && a->lx == b->lx && a->ly == b->ly && a->rx == b->rx && a->ry == b->ry;
+}
+
+static uint32_t rb_crc(void) {
+    uint32_t h = 2166136261u;
+    for (uint32_t a = 0x80010000u; a < CHECK_END; a += 4) {
+        if (a == 0x800AC89Cu || a == 0x800A9DB0u || (a >= 0x800DE140u && a < 0x800DE540u)) continue;
+        if (a == 0x800A7F30u || a == 0x800A7F50u || a == 0x800A7F54u || (a >= 0x800A7E20u && a < 0x800A7E40u)) continue;
+        if ((a >= 0x800D9000u && a < 0x800DB000u) || a == 0x800A6ED8u || a == 0x800A6EDCu) continue;
+        h = (h ^ psx_mod_read_word(a)) * 16777619u;
+    }
+    return h;
+}
+
+/* Confirm the frames whose real buttons are here and equal the ones played;
+ * returns the first frame played with other buttons, or 0xFFFFFFFF. */
+static uint32_t rb_confirm(void) {
+    while (s_rb_confirmed < s_frame) {
+        const uint32_t g = s_rb_confirmed;
+        if (!remote_ready(g)) break;
+        if (s_used_tag[g % RING] == g + 1 && !pad_same(&s_used[g % RING], &s_remote[g % RING])) return g;
+        if (g >= s_last_remote_frame) { s_last_remote = s_remote[g % RING]; s_last_remote_frame = g; }
+        s_rb_confirmed++;
+    }
+    return 0xFFFFFFFFu;
+}
+
+static void rb_step(PSXModPad pads[2], PSXModPad mine) {
+    if (s_frame == 0 && !psx_modrb_enabled()) {
+        psx_modrb_enable(rb_loaded);
+        s_rb_confirmed = 0;
+        memset(s_used_tag, 0, sizeof s_used_tag);
+        neutral(&s_last_remote);
+        s_last_remote_frame = 0;
+        s_rb_rollbacks = s_rb_deepest = s_rb_stalls = s_rb_guessed = s_rb_slowed = 0;
+        s_rb_ahead_avg = s_rb_peer_ahead = 0.0f;
+        s_rb_dumped = 0;
+        memset(s_rbc_mine_f, 0, sizeof s_rbc_mine_f);
+        memset(s_rbc_theirs_f, 0, sizeof s_rbc_theirs_f);
+        s_rbc_sent = 0;
+        for (int i = 0; i < s_delay; i++) s_remote_at[i % RING] = GetTickCount();
+        say("rollback play (own buttons %d frame late, window %d frames)", RB_LOCAL_DELAY, RB_WINDOW);
+    }
+    const int resim = psx_modrb_resimulating();
+    if (!pump()) { close_all(1, "the other player left"); return; }
+    if (!handle_messages()) return;
+    udp_pump();
+    if (!resim) {   /* this player's buttons, fixed once sent */
+        const uint32_t ahead = s_frame + (uint32_t)RB_LOCAL_DELAY;
+        while ((int32_t)(ahead - s_last_sent) > 0) {
+            s_last_sent++;
+            s_local[s_last_sent % RING] = mine;
+            PadMsg m = { s_last_sent, mine };
+            if (!send_msg(MSG_PAD, &m, sizeof m)) { close_all(1, "the connection broke"); return; }
+        }
+        udp_send();
+    }
+    uint32_t bad = rb_confirm();
+    /* too far ahead of what the other player confirmed: wait, as lockstep does */
+    if (!resim && bad == 0xFFFFFFFFu && s_frame - s_rb_confirmed >= (uint32_t)RB_WINDOW) {
+        const DWORD t0 = GetTickCount();
+        int resent = 0;
+        s_rb_stalls++;
+        while (!remote_ready(s_rb_confirmed)) {
+            if (!pump()) { close_all(1, "the other player left"); return; }
+            if (!handle_messages()) return;
+            udp_pump();
+            if (GetTickCount() - t0 > 10000) { close_all(1, "the other player stopped answering"); return; }
+            if (GetTickCount() - t0 >= (DWORD)(2 + 8 * resent)) { resent++; udp_send(); }
+            Sleep(0);
+        }
+        bad = rb_confirm();
+    }
+    if (!resim) {
+        /* Both PCs see the same network delay, so the one that is further
+         * past its confirmed frames is simply ahead in time: it gives the
+         * other a little of each frame to catch up (otherwise it would run
+         * into the window and stop in jolts). */
+        s_rb_ahead_avg = s_rb_ahead_avg * 0.9f + (float)(s_frame - s_rb_confirmed) * 0.1f;
+        const float lead = (s_rb_ahead_avg - s_rb_peer_ahead) * 0.5f;   /* frames */
+        if (lead >= 0.75f && s_frame > 120u) {
+            extern void psx_mod_pacer_shift_ms(double ms);
+            psx_mod_pacer_shift_ms(lead > 4.0f ? 2.0 : (double)lead * 0.5);   /* the frame cadence, half a ms per frame of lead */
+            s_rb_slowed++;
+        }
+    }
+    if (!resim && bad != 0xFFFFFFFFu) {
+        /* frame `bad` was played with a wrong guess: back to the tick that
+         * holds the frames below it, at the end of this boundary */
+        /* (a tick without a snapshot: from the newest one before it; the
+         * frames in between are replayed with the buttons already confirmed) */
+        const uint32_t from = psx_modrb_snapshot_at_or_before(bad);
+        if (!from || s_frame - from >= (uint32_t)RING - 4u || !psx_modrb_rewind(from)) {
+            PsxModRbStats st;
+            psx_modrb_get_stats(&st);
+            say("rollback refused: frame %u wrong, now %u, tick %u, snapshots %u (failed %u), loads %u (failed %u), held %d",
+                bad, s_frame, psx_modrb_tick(), (unsigned)st.saves, (unsigned)st.save_failures, (unsigned)st.loads,
+                (unsigned)st.load_failures, psx_modrb_can_rewind(bad));
+            close_all(1, "the game could not go back far enough");
+            return;
+        }
+        s_rb_rollbacks++;
+        if (s_frame - from > s_rb_deepest) s_rb_deepest = s_frame - from;
+    }
+    /* this frame's buttons */
+    const uint32_t f = s_frame;
+    PSXModPad theirs;
+    /* A guess must be one the machine can take back: with no snapshot at or
+     * before this frame yet (the first frames of the session), wait for the
+     * real buttons as lockstep does. */
+    if (!resim && !remote_ready(f) && !psx_modrb_snapshot_at_or_before(f)) {
+        const DWORD t0 = GetTickCount();
+        int resent = 0;
+        while (!remote_ready(f)) {
+            if (!pump()) { close_all(1, "the other player left"); return; }
+            if (!handle_messages()) return;
+            udp_pump();
+            if (GetTickCount() - t0 > 10000) { close_all(1, "the other player stopped answering"); return; }
+            if (GetTickCount() - t0 >= (DWORD)(2 + 8 * resent)) { resent++; udp_send(); }
+            Sleep(0);
+        }
+    }
+    if (remote_ready(f)) {
+        theirs = s_remote[f % RING];
+        if (f >= s_last_remote_frame) { s_last_remote = theirs; s_last_remote_frame = f; }
+    } else {
+        theirs = s_last_remote;
+        if (!resim) s_rb_guessed++;
+    }
+    s_used[f % RING] = theirs;
+    s_used_tag[f % RING] = f + 1;
+    pads[0] = s_role == ROLE_HOST ? s_local[f % RING] : theirs; pads[0].connected = 1;
+    pads[1] = s_role == ROLE_HOST ? theirs : s_local[f % RING]; pads[1].connected = 1;
+
+    /* the checksum of the game before frame f, sent once every frame below f
+     * is confirmed (a replay through f computes it again) */
+    if (f && f % CHECK_EVERY == 0) {
+        if (env_on("TSR_ONLINE_DUMP")) {   /* test: the RAM of each check (a replay writes it again) */
+            char path[96];
+            snprintf(path, sizeof path, "online_ram_%s_%u.bin", s_role == ROLE_HOST ? "host" : "join", f);
+            FILE* df = fopen(path, "wb");
+            if (df) {
+                for (uint32_t a = 0x80000000u; a < 0x80200000u; a += 4) { uint32_t w = psx_mod_read_word(a); fwrite(&w, 4, 1, df); }
+                fclose(df);
             }
         }
-        const char* hold = getenv("TSR_HOLD");
-        if (hold && hold[0] && s_boot_done && s_boot_frames++ > 600u) pads[0].buttons = (uint16_t)strtoul(hold, NULL, 16);
+        {
+            const uint32_t k = (f / CHECK_EVERY) & 1u;
+            if (!s_rb_keep[k]) s_rb_keep[k] = (uint32_t*)malloc(RB_KEEP_WORDS * 4u);
+            if (s_rb_keep[k]) {
+                for (uint32_t w = 0; w < RB_KEEP_WORDS; ++w) s_rb_keep[k][w] = psx_mod_read_word(0x80010000u + w * 4u);
+                s_rb_keep_f[k] = f;
+            }
+        }
+        s_rbc_mine[(f / CHECK_EVERY) % 8u] = rb_crc();
+        s_rbc_mine_f[(f / CHECK_EVERY) % 8u] = f;
+    }
+    {
+        const uint32_t next = s_rbc_sent + CHECK_EVERY;
+        const uint32_t i = (next / CHECK_EVERY) % 8u;
+        if (!resim && s_rbc_mine_f[i] == next && s_rb_confirmed >= next) {
+            uint32_t body[2] = { next, s_rbc_mine[i] };
+            send_msg(MSG_CHECK, body, sizeof body);
+            s_rbc_sent = next;
+            rb_check_compare(next);
+        }
+    }
+    if (!resim && f && f % 600u == 0u)
+        say("rollback: %u rollbacks so far (deepest %u frames), %u frames guessed, %u waits, %u frames slowed; %.1f frames ahead of the confirmed ones (other PC %.1f)",
+            s_rb_rollbacks, s_rb_deepest, s_rb_guessed, s_rb_stalls, s_rb_slowed, s_rb_ahead_avg, s_rb_peer_ahead);
+    s_frame++;
+}
+
+/* TEST (TSR_RB_TEST="N,K"): in the scripted race, every N boundaries rewind K
+ * ticks and replay them with the same pads; the game-relevant RAM at every
+ * replayed boundary must equal what the live run had there. */
+static uint32_t rb_test_crc(void) {
+    uint32_t h = 2166136261u;
+    for (uint32_t a = 0x80010000u; a < CHECK_END; a += 4) {
+        if (a == 0x800AC89Cu || a == 0x800A9DB0u || (a >= 0x800DE140u && a < 0x800DE540u)) continue;
+        if (a == 0x800A7F30u || a == 0x800A7F50u || a == 0x800A7F54u || (a >= 0x800A7E20u && a < 0x800A7E40u)) continue;
+        if ((a >= 0x800D9000u && a < 0x800DB000u) || a == 0x800A6ED8u || a == 0x800A6EDCu) continue;
+        h = (h ^ psx_mod_read_word(a)) * 16777619u;
+    }
+    return h;
+}
+static void rb_test(unsigned since_race) {
+    static int n = -1, k;
+    static uint32_t crc[64], crc_tick[64];
+    static unsigned rewinds, compared, mismatched, refused, live_since;
+    if (n < 0) {
+        const char* e = getenv("TSR_RB_TEST");
+        n = 0;
+        if (e && e[0]) { n = atoi(e); const char* c = strchr(e, ','); k = c ? atoi(c + 1) : 4; }
+    }
+    if (!n || since_race < 700u) return;
+    if (!psx_modrb_enabled()) { extern void tsr_native_scene_on_rollback(void); psx_modrb_enable((void (*)(uint32_t))(void*)tsr_native_scene_on_rollback); return; }
+    const uint32_t done = psx_modrb_tick();          /* the RAM now: the end of this tick */
+    const uint32_t c = rb_test_crc();
+    /* the live RAM of the last 16 ticks, to name what a replay changed */
+    #define RBT_WORDS ((CHECK_END - 0x80010000u) / 4u)
+    static uint32_t* s_ram[16];
+    static uint32_t s_ram_tick[16];
+    uint32_t* cur = NULL;
+    if (!psx_modrb_resimulating()) {
+        uint32_t k = done % 16u;
+        if (!s_ram[k]) s_ram[k] = (uint32_t*)malloc(RBT_WORDS * 4u);
+        if (s_ram[k]) {
+            for (uint32_t w = 0; w < RBT_WORDS; ++w) s_ram[k][w] = psx_mod_read_word(0x80010000u + w * 4u);
+            s_ram_tick[k] = done;
+        }
+    } else if (s_ram[done % 16u] && s_ram_tick[done % 16u] == done) {
+        cur = s_ram[done % 16u];
+    }
+    if (psx_modrb_resimulating() && crc_tick[done % 64u] == done) {
+        compared++;
+        if (crc[done % 64u] != c) {
+            mismatched++;
+            if (mismatched <= 8u) {
+                fprintf(stdout, "TSR RB TEST: MISMATCH at tick %u (live %08X, replay %08X)\n", done, crc[done % 64u], c);
+                if (cur) {
+                    unsigned shown = 0;
+                    for (uint32_t w = 0; w < RBT_WORDS && shown < 16u; ++w) {
+                        const uint32_t a = 0x80010000u + w * 4u, v = psx_mod_read_word(a);
+                        if (v != cur[w]) { fprintf(stdout, "  %08X: live %08X replay %08X\n", a, cur[w], v); shown++; }
+                    }
+                }
+                fflush(stdout);
+            }
+        }
+    }
+    crc[done % 64u] = c;
+    crc_tick[done % 64u] = done;
+    if (!psx_modrb_resimulating() && ++live_since >= (unsigned)n && done > (uint32_t)k + 2u) {
+        live_since = 0;
+        if (psx_modrb_rewind(done - (uint32_t)k)) rewinds++; else refused++;
+    }
+    if (rewinds && rewinds % 20u == 0u && live_since == 1u) {
+        PsxModRbStats st;
+        psx_modrb_get_stats(&st);
+        fprintf(stdout, "TSR RB TEST: %u rewinds (%u refused), %u boundaries compared, %u mismatched; snapshots %llu avg %.2f ms, loads %llu avg %.2f ms, %llu frames replayed\n",
+                rewinds, refused, compared, mismatched, (unsigned long long)st.saves, st.saves ? st.save_ms / (double)st.saves : 0.0,
+                (unsigned long long)st.loads, st.loads ? st.load_ms / (double)st.loads : 0.0, (unsigned long long)st.resim_frames);
+        fflush(stdout);
+    }
+}
+
+static void online_pads(PSXModPad pads[2]) {
+#if defined(_WIN32)
+    {   /* test (TSR_AUTORACE): from the main menu into a two-player race by
+         * itself, the same buttons on the same frames every run -- Circle on
+         * the main menu (two players), then Cross from each pad in turn
+         * through the character and track select; in the race pad 1 holds
+         * Cross (accelerate). No save state involved. */
+        static int s_auto = -1, s_stage;
+        static unsigned s_calls, s_menu_calls, s_race_at;
+        if (s_auto < 0) s_auto = env_on("TSR_AUTORACE");
+        if (s_auto) {
+            s_calls++;
+            { extern int g_snap_bench_req; if (s_stage == 3) g_snap_bench_req = 1; }   /* test: PSX_SNAP_BENCH */
+            if (s_stage == 0) {
+                /* up to the main menu: Start, then Triangle, in turn (the
+                 * title and the screen after it), none once the menu shows */
+                if (main_menu_shown()) s_menu_calls++;
+                else {
+                    const unsigned ph = s_calls % 120u;
+                    s_menu_calls = 0;
+                    if (s_calls > 200u && ph < 6u) pads[0].buttons = (uint16_t)~BTN_START;
+                    if (s_calls > 200u && ph >= 60u && ph < 66u) pads[0].buttons = (uint16_t)~BTN_TRIANGLE;
+                }
+                if (s_menu_calls >= 120u) { s_stage = 1; s_menu_calls = 0; }
+            } else if (s_stage == 1) {
+                pads[0].buttons = (uint16_t)~BTN_CIRCLE;
+                if (++s_menu_calls >= 8u) { s_stage = 2; s_menu_calls = 0; }
+            } else if (s_stage == 2) {
+                const unsigned ph = s_menu_calls++ % 60u;
+                if (ph >= 30u && ph < 36u) pads[0].buttons = (uint16_t)~BTN_CROSS;
+                if (ph >= 45u && ph < 51u) pads[1].buttons = (uint16_t)~BTN_CROSS;
+                if (psx_mod_read_byte(0x800A9D34u)) {   /* EU: the two-player race is on */
+                    s_stage = 3; s_race_at = s_calls;
+                    {   /* measure 1000 frames, from 1200 frames on (the kart holding Cross by then) */
+                        extern void psx_runtime_perf_bench_arm(uint32_t after, uint32_t frames);
+                        psx_runtime_perf_bench_arm(1200u, 1000u);
+                    }
+                    fprintf(stdout, "TSR TEST: race on at pad call %u\n", s_calls);
+                    fflush(stdout);
+                }
+            } else {
+                if (s_calls - s_race_at > 500u) pads[0].buttons = (uint16_t)~BTN_CROSS;
+                rb_test(s_calls - s_race_at);
+            }
+        }
     }
     take_request();
     if (s_state != ST_PLAY) ui_pads(pads);   /* the online menu may have the buttons */
@@ -1255,7 +1612,8 @@ static void online_pads(PSXModPad pads[2]) {
 
     /* lockstep: send this player's buttons for frame + delay, play frame
      * with both players' buttons of frame (neutral before the delay) */
-    if (s_frame == 0) {
+    if (s_frame == 0 && !(s_rb && psx_modrb_enabled())) {
+        if (s_rb) s_delay = RB_LOCAL_DELAY;
         memset(s_remote_have, 0, sizeof s_remote_have);
         for (int i = 0; i < s_delay; i++) {   /* the first frames: nobody presses */
             neutral(&s_local[i % RING]);
@@ -1266,6 +1624,7 @@ static void online_pads(PSXModPad pads[2]) {
         s_send_delay = s_delay;
         s_delay_drop_at = GetTickCount() + 3000;
     }
+    if (s_rb) { rb_step(pads, mine); return; }
     /* this player's buttons for the frames up to frame + delay not sent yet
      * (the delay grew: the frames in between get the same buttons; it
      * shrank: nothing new until frame + delay passes what was sent). Each
@@ -1454,6 +1813,7 @@ int tsr_online_local_view(void) {
 
 void tsr_online_list_hook(void) {
     if (env_on("TSR_MUTEALL")) psx_mod_set_list_mute(1);   /* test: the game's drawing skipped */
+    { extern int psx_modrb_resimulating(void); if (psx_modrb_resimulating()) psx_mod_set_list_mute(1); }   /* replayed frames are not drawn */
     const int view = tsr_online_local_view();
     if (view < 0) {
         psx_mod_set_hidden_area(-1, -1);

@@ -353,6 +353,23 @@ label = "Original"
 value = "lower"
 label = "Lower"
 
+[[option]]
+feature = "online"
+id = "netcode"
+label = "Online: response to your buttons"
+description = "'Wait for the other player' (the tested mode) plays each frame only when both players' buttons are there: your buttons act a few frames late, more with a slow connection. 'Immediate (rollback, experimental)' plays your buttons at once and guesses the other player's; when a guess was wrong the game goes back a few frames and replays them, unseen. Both PCs must choose the same."
+group = "Fixes"
+type = "choice"
+default = "lockstep"
+
+[[option.choice]]
+value = "lockstep"
+label = "Wait for the other player"
+
+[[option.choice]]
+value = "rollback"
+label = "Immediate (rollback, experimental)"
+
 [[plugin]]
 feature = "version"
 id = "toystoryracer.versions"

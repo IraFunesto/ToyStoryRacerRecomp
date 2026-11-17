@@ -1559,6 +1559,19 @@ static void desktop_aspect(unsigned* num, unsigned* den) {
 int g_tsr_widescreen_on;   /* the widescreen feature is on (tsr_online.c compares it with the other PC) */
 static void tsr_widescreen_activate(void) {
     g_tsr_widescreen_on = 1;
+    {   /* the draw lists consumed at once (dma_gpu_ll.c): the game no longer
+         * polls the GPU while the console would be sending them */
+        extern int g_dma_gpu_ll_instant;
+        const char* q = getenv("TSR_LLINSTANT");   /* test: 0 = the console's timing */
+        g_dma_gpu_ll_instant = !(q && q[0] == '0');
+    }
+    {   /* controller bytes exchanged in a few cycles (sio.c): the pad routine
+         * no longer polls the port's status thousands of times a frame */
+        extern uint32_t g_sio_baud_cycles, g_sio_ack_cycles;
+        const char* q = getenv("TSR_SIOFAST");   /* test: 0 = the console's timing */
+        unsigned div = q && q[0] ? (unsigned)atoi(q) : 8u;   /* 0 or 1 = the console's timing */
+        if (div > 1u) { g_sio_baud_cycles = 1088u / div; g_sio_ack_cycles = 170u / div; }
+    }
     char aspect[16], vsync[8], hud[16], oc[16], pool[16], smooth[16], music[16], fps[16];
     unsigned num = 16u, den = 9u;
     int fit = 1;

@@ -22,6 +22,11 @@ project(ToyStoryRacerRecomp LANGUAGES C CXX)
 # endif()
 set(PSX_SETUP_WIZARD ON CACHE BOOL
     "Advertise first-run setup wizard + Generate & rebuild in recomp-ui" FORCE)
+# Fast cycles: the game's generated code counts one cycle per instruction
+# (two per load) instead of the R3000A interlock and instruction-cache model.
+# The game runs overclocked and paces on VBlank, so exact CPU timing is not
+# needed; the count is the same on every PC (online play stays in step).
+set(PSX_FAST_CYCLES ON)
 include("${PSXRECOMP_ROOT}/runtime/runtime.cmake")
 
 # This project's own mod catalog. The FRAMEWORK stages it -- together with its

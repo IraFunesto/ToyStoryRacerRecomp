@@ -180,25 +180,36 @@ default):
   polygon pool, music change, widescreen, instant loading, instant memory
   card); the connection is refused with the name of the option that
   differs. Picture options (resolution, aspect, HUD size...) may differ.
-- **Needs a reasonably fast PC on both sides.** The two games advance
-  together, so the slower PC sets the pace for both: if one of them cannot
-  run a two-player race at full speed, both slow down. A two-player race at
-  60 fps (NTSC, *50 fps (also 2 players)*) needs a recent CPU; an older one
-  (e.g. an i7-3770) drops to about 45 fps in heavy parts. *Frame rate in
-  races* = *50 fps (1 player)* on both PCs (two-player races at the game's
-  original rate) halves the load.
+- **Rollback (experimental)**: *Online: response to your buttons* (Fixes
+  group) = *Immediate (rollback, experimental)* on **both** PCs. Your
+  buttons act on the next frame; the other player's are guessed until they
+  arrive, and when a guess was wrong the game goes back the few frames
+  since and replays them, unseen (the other kart may correct its position
+  slightly). With the default, *Wait for the other player*, each frame waits
+  for both players' buttons: your buttons act a few frames late (5 frames,
+  about 83 ms, at a 60 ms round trip).
+- The two games advance together, so the slower PC sets the pace for both.
+  The game is now light enough for 60 fps two-player races on older CPUs
+  (tested with an i7-3770). Live vsync is off during online play: a frame
+  that just missed the screen's refresh no longer costs a whole refresh.
 - A log of the connection (`tsr_online.log`, next to the game) records
   every 10 s the round trip, the waits and each PC's time per frame.
-- How it works: input lockstep. The host sends its game state once when the
-  other player joins (both PCs then load the same state); after that only
-  the buttons travel, every frame, by UDP with the last 16 frames in each
-  packet (and a TCP copy), a few frames ahead, the margin adapting to the
-  round trip and to lost packets. A checksum of the game's memory is
-  compared every two seconds.
+- How it works: the host sends its game state once when the other player
+  joins (both PCs then load the same state); after that only the buttons
+  travel, every frame, by UDP with the last 16 frames in each packet (and a
+  TCP copy). A checksum of the game's memory is compared every two seconds;
+  in rollback mode a mismatch writes `online_desync_<host|join>_<frame>.bin`
+  next to the game (the two PCs' files show what differs). Rollback keeps a
+  snapshot of the machine after every frame (about 0.3 ms) and replays
+  without drawing, sound or pacing.
 
-**Faster frames** — the game's frame wait loop is now skipped by the
-runtime's idle skip instead of being run at the overclocked rate: about a
-third less CPU work per frame, the same on every PC.
+**A lighter game** — about 35% less CPU work per frame than 0.3.0: the
+game's own code counts a flat cost per instruction instead of the R3000A
+pipeline model (it runs overclocked and paces on VBlank, so exact CPU timing
+is not needed), the draw lists are consumed at once instead of a word per
+cycle, the controller exchanges a byte 8x faster, and the native renderer
+reads the game's memory directly. The game's frame wait loop is skipped by
+the runtime's idle skip. All of it is the same on every PC.
 
 **Another disc in the launcher** — picking the disc of another version in a
 game's launcher (*Browse For Disc*) now starts that version, or opens the
@@ -254,7 +265,8 @@ prompts, disc file overrides, CD/XA loading, the disc as files, function and
 kernel-call hooks for the instant loading and memory card, a disc-folder hook
 and a disc-serial hook for the three-disc setup, GPU packet safety,
 CPU overclock, and for the online play a per-frame pad hook, save state
-transfer, hidden/remapped drawing areas and a foreign-disc hook, and more). They ship inside the release zip and are kept here as
+transfer, hidden/remapped drawing areas, a foreign-disc hook, fast cycles,
+instant draw lists and a rollback module (psx_modrb), and more). They ship inside the release zip and are kept here as
 `patches/psxrecomp-toystoryracer.patch` against the pinned `psxrecomp`
 submodule commit.
 

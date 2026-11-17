@@ -177,6 +177,20 @@ index f9547eb8..12379a56 100644
  int         psx_bios_hle_enabled(void);
  int         psx_bios_hle_boot_skip_enabled(void);
  const char* psx_bios_hle_backend_name(void); /* startup banner */
+diff --git a/runtime/include/boot_state.h b/runtime/include/boot_state.h
+index 3ee203e1..ceeae0c9 100644
+--- a/runtime/include/boot_state.h
++++ b/runtime/include/boot_state.h
+@@ -122,6 +122,9 @@ int  boot_state_save_buffer(const CPUState* cpu, uint32_t bios_checksum,
+ 
+ /* In-memory ring snaps: same sections, no zlib. Load accepts either form.
+  * Avoids compress2 on ~3.5 MiB RAM+VRAM+SPU every live/resim snap (FPS). */
++int  boot_state_save_buffer_reuse(const CPUState* cpu, uint32_t bios_checksum,
++                                  uint32_t entry_pc, uint8_t** io_data,
++                                  size_t* io_cap, size_t* out_len);
+ int  boot_state_save_buffer_raw(const CPUState* cpu, uint32_t bios_checksum,
+                                 uint32_t entry_pc, uint8_t** out_data,
+                                 size_t* out_len);
 diff --git a/runtime/include/cdrom.h b/runtime/include/cdrom.h
 index 5a33b389..2bbb8c10 100644
 --- a/runtime/include/cdrom.h
@@ -339,7 +353,7 @@ index 93c8de19..bc9de540 100644
  /* Allocations are fixed during activation. Snapshot allocated bytes, never
   * host pointers; immutable host assets are reconstructed separately. */
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index 471041bd..fa2b043a 100644
+index 471041bd..3d0d12e6 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
 @@ -1,5 +1,6 @@
@@ -441,7 +455,7 @@ index 471041bd..fa2b043a 100644
  /* Experimental retained-texture service (currently OpenGL only). IDs are
   * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
   * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
-@@ -54,6 +133,11 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+@@ -54,6 +133,16 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
   * blending and destination-mask checks retain per-primitive isolation. Call
   * from activation or an emulation-thread render boundary. */
  void psx_mod_set_texture_bank_batching(int enabled);
@@ -450,10 +464,15 @@ index 471041bd..fa2b043a 100644
 + * arena): batched in painter order on the single-pass dual-source path
 + * instead of one draw each. The game's own primitives keep their isolation. */
 +void psx_mod_set_native_packet_batching(int enabled);
++/* A packet arena rebuilt every frame: only its first `live` bytes (of `cap`
++ * from `address`) are kept in rollback snapshots. Call when `live` changes. */
++void psx_mod_gpu_dma_set_live(uint32_t address, uint32_t cap, uint32_t live);
++/* The live size of an arena as the last restored rollback snapshot held it. */
++uint32_t psx_mod_gpu_dma_get_live(uint32_t address);
  /* A dedicated GPU-DMA packet arena. Only GT3 commands sourced from this
   * allocation interpret C1/C2's otherwise-unused high bytes as a bank ID:
   * id = (C1 >> 24) | ((C2 >> 24) << 8). ID zero uses ordinary VRAM. The rest
-@@ -105,6 +189,28 @@ int32_t psx_mod_widescreen_x_margin(void);
+@@ -105,6 +194,28 @@ int32_t psx_mod_widescreen_x_margin(void);
   * compositor translates it by the live reveal, excluding culling guards.
   * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
  void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
@@ -482,7 +501,7 @@ index 471041bd..fa2b043a 100644
  /* Exclude a known world packet from screen-space backdrop stretching, even
   * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
  void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
-@@ -340,6 +446,19 @@ enum {
+@@ -340,6 +451,19 @@ enum {
  };
  uint32_t psx_mod_render_pass_status(void);
  int psx_mod_set_auto_skip_fmv(int enabled);
@@ -526,6 +545,147 @@ index ed80c0a3..8fd40640 100644
  #ifdef __cplusplus
  }
  #endif
+diff --git a/runtime/include/psx_cyc.h b/runtime/include/psx_cyc.h
+index d5fb196e..73e3fe68 100644
+--- a/runtime/include/psx_cyc.h
++++ b/runtime/include/psx_cyc.h
+@@ -202,6 +202,15 @@ static inline void psx_cyc_lds(CPUState* cpu) {
+  * reg_mask from psx_cyc_dep_res_mask(). MUST be emitted BEFORE the instruction
+  * body so §1 precedes any muldiv/GTE deadline stall in the body (Beetle order). */
+ static inline void psx_cyc_step(CPUState* cpu, uint32_t reg_mask) {
++#if defined(PSX_FAST_CYCLES) && !defined(PSX_OVERLAY_DLL_BUILD) && !defined(PSX_FAST_CYCLES_EXACT_TU)
++    /* Fast cycles (game opt-in, generated code only): one cycle per
++     * instruction added straight to the block's batch, published at the
++     * block's flush; no R3000A interlock bookkeeping. The same count on
++     * every host. */
++    (void)cpu; (void)reg_mask;
++    g_psx_cyc_batch += 1u;
++    return;
++#endif
+     psx_cyc_base(cpu);
+     psx_cyc_deps(cpu, reg_mask);
+     psx_cyc_lds(cpu);
+@@ -237,8 +246,13 @@ static inline uint32_t psx_cyc_load_word(CPUState* cpu, uint32_t addr,
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+     uint32_t phys = addr & 0x1FFFFFFFu;
+     if (g_ls_mode == 0 && !g_ds_recording && phys < 0x00800000u) {
++#if defined(PSX_FAST_CYCLES) && !defined(PSX_FAST_CYCLES_EXACT_TU)
++        g_psx_cyc_batch += 2u;   /* fast cycles: a main-RAM load, flat cost */
++        if (0) {
++#else
+         if (g_psx_load_delay < 0) (void)psx_load_delay_enabled();
+         if (g_psx_load_delay) {
++#endif
+             psx_cyc_base(cpu);
+             psx_cyc_deps(cpu, reg_mask);
+             if (cpu->ld_which_t == rt) cpu->ld_which_t = 0u;
+@@ -267,8 +281,13 @@ static inline uint16_t psx_cyc_load_half(CPUState* cpu, uint32_t addr,
+ #ifdef PSX_ENABLE_BLOCK_CYCLES
+     uint32_t phys = addr & 0x1FFFFFFFu;
+     if (g_ls_mode == 0 && !g_ds_recording && phys < 0x00800000u) {
++#if defined(PSX_FAST_CYCLES) && !defined(PSX_FAST_CYCLES_EXACT_TU)
++        g_psx_cyc_batch += 2u;   /* fast cycles: a main-RAM load, flat cost */
++        if (0) {
++#else
+         if (g_psx_load_delay < 0) (void)psx_load_delay_enabled();
+         if (g_psx_load_delay) {
++#endif
+             psx_cyc_base(cpu);
+             psx_cyc_deps(cpu, reg_mask);
+             if (cpu->ld_which_t == rt) cpu->ld_which_t = 0u;
+diff --git a/runtime/include/psx_icache.h b/runtime/include/psx_icache.h
+index e1d1b722..0199b21a 100644
+--- a/runtime/include/psx_icache.h
++++ b/runtime/include/psx_icache.h
+@@ -12,6 +12,10 @@ extern int g_psx_icache_active;
+ extern int g_ls_replay_active;
+ void psx_icache_reset(void);
+ void psx_icache_fetch(CPUState *cpu, uint32_t addr);
++#if defined(PSX_FAST_CYCLES) && !defined(PSX_FAST_CYCLES_EXACT_TU)
++/* fast cycles: no instruction-cache model in generated code */
++#define psx_icache_fetch(cpu, addr) ((void)(cpu), (void)(addr))
++#endif
+ void psx_icache_fetch_miss(CPUState *cpu, uint32_t addr);
+ 
+ /* Keep the interpreter's steady-state tag hit inside its translation unit.
+diff --git a/runtime/include/psx_modrb.h b/runtime/include/psx_modrb.h
+new file mode 100644
+index 00000000..aca43380
+--- /dev/null
++++ b/runtime/include/psx_modrb.h
+@@ -0,0 +1,46 @@
++#ifndef PSX_MODRB_H
++#define PSX_MODRB_H
++
++/* Rollback for trusted plugins -- see psx_modrb.c. */
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct CPUState;
++
++typedef struct {
++    uint64_t saves, loads, resim_frames, save_failures, load_failures;
++    double   save_ms, load_ms;
++} PsxModRbStats;
++
++/* Start taking a snapshot at every boundary; `loaded` is called right after a
++ * rewind restored tick `tick` (before the replay starts). */
++void psx_modrb_enable(void (*loaded)(uint32_t tick));
++void psx_modrb_disable(void);
++int  psx_modrb_enabled(void);
++/* Boundaries completed since enable. */
++uint32_t psx_modrb_tick(void);
++/* 1 if the snapshot of `tick` is still held. */
++int  psx_modrb_can_rewind(uint32_t tick);
++/* The newest tick at or before `tick` whose snapshot is held; 0 if none. */
++uint32_t psx_modrb_snapshot_at_or_before(uint32_t tick);
++/* Rewind to `tick` at the end of the current boundary and replay up to the
++ * tick the live run had reached. 0 if refused (no snapshot, one pending). */
++int  psx_modrb_rewind(uint32_t tick);
++/* 1 from a rewind request until its replay has caught up with the live run. */
++int  psx_modrb_resimulating(void);
++void psx_modrb_get_stats(PsxModRbStats* out);
++
++/* Runtime hooks (main.cpp / interrupts.c). */
++void psx_modrb_finish_frame(void);
++void psx_modrb_poll(struct CPUState* cpu, uint32_t resume_pc);
++void psx_modrb_flush_load(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PSX_MODRB_H */
+diff --git a/runtime/runtime.cmake b/runtime/runtime.cmake
+index a8d6dd51..77b993d0 100644
+--- a/runtime/runtime.cmake
++++ b/runtime/runtime.cmake
+@@ -372,6 +372,7 @@ set(PSXRECOMP_RUNTIME_SOURCES
+     ${PSXRECOMP_ROOT}/runtime/src/psx_netplay_rb.c
+     ${PSXRECOMP_ROOT}/runtime/src/psx_netplay_sched.c
+     ${PSXRECOMP_ROOT}/runtime/src/psx_selfcheck.c
++    ${PSXRECOMP_ROOT}/runtime/src/psx_modrb.c
+     ${PSXRECOMP_ROOT}/runtime/src/bios_hle.c
+     ${PSXRECOMP_ROOT}/runtime/src/bios_hle_plan.c
+     ${PSXRECOMP_ROOT}/runtime/src/savestate.c
+@@ -1398,6 +1399,13 @@ function(psxrecomp_add_runtime_target target)
+     if(PSXRT_GAME_GENERATED_FULL_C)
+         foreach(_full_src IN LISTS PSXRT_GAME_GENERATED_FULL_C)
+             set_source_files_properties("${_full_src}" PROPERTIES GENERATED TRUE)
++            # Game opt-in (set(PSX_FAST_CYCLES ON) before including this
++            # file): flat per-instruction cycle cost in the game's generated
++            # code only (psx_cyc.h); the runtime keeps the exact model.
++            if(PSX_FAST_CYCLES)
++                set_source_files_properties("${_full_src}" PROPERTIES
++                    COMPILE_DEFINITIONS "PSX_FAST_CYCLES=1")
++            endif()
+             list(APPEND generated_sources "${_full_src}")
+             list(APPEND _game_generated_check "${_full_src}")
+         endforeach()
 diff --git a/runtime/src/bios_hle.c b/runtime/src/bios_hle.c
 index 0d82b7b9..560a6725 100644
 --- a/runtime/src/bios_hle.c
@@ -571,6 +731,83 @@ index 0d82b7b9..560a6725 100644
  }
  
  int psx_bios_hle_enabled(void)           { return s_call_hle_on; }
+diff --git a/runtime/src/boot_state.c b/runtime/src/boot_state.c
+index 8c263fc8..c6d4def0 100644
+--- a/runtime/src/boot_state.c
++++ b/runtime/src/boot_state.c
+@@ -381,6 +381,21 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
+                               uint32_t bios_checksum, uint32_t entry_pc) {
+     BootStateHeader h;
+     int ok;
++    /* Bring the devices up to the CPU's clock BEFORE any section is written.
++     * The clock runs ahead of the devices between services (deadline model):
++     * a state held the CPU's cycle count but the devices' older VBlank phase,
++     * timers, CD and DMA positions, and the restore re-anchors the devices at
++     * the restored clock -- so the cycles not yet serviced were lost and a
++     * restored machine reached its next VBlank that many cycles late (a
++     * thousand or more). Servicing early is neutral for the running machine. */
++    {
++        extern void psx_devices_mmio_sync(void);
++        psx_devices_mmio_sync();
++        {   /* and the SPU, which the host pumps from the clock */
++            extern void (*g_psx_pre_snapshot_hook)(void);
++            if (g_psx_pre_snapshot_hook) g_psx_pre_snapshot_hook();
++        }
++    }
+     memset(&h, 0, sizeof h);
+     h.magic         = BOOT_STATE_MAGIC;
+     h.version       = psx_mod_memory_snapshot_bytes() ? BOOT_STATE_VERSION : 7u;
+@@ -425,7 +440,14 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
+     if (ok) {
+         /* §96 incremental mirror only while RB dirty-tracking is on.
+          * Offline / delay-sync / zlib disk: classic full transfer_out. */
+-        if (o->no_zlib && gpu_vram_dirty_tracking()) {
++        extern int g_mod_memory_snapshot_lite;
++        if (g_mod_memory_snapshot_lite) {
++            /* Rollback snapshot: the video memory is left as it is (reading
++             * it back from the GPU costs milliseconds; the frames replayed
++             * after a rollback repeat their own uploads). The section is
++             * written for the format's sake and ignored on load. */
++            ok = write_section(o, BS_SEC_VRAM, s_vram_mirror, VRAM_SIZE);
++        } else if (o->no_zlib && gpu_vram_dirty_tracking()) {
+             ok = sync_vram_mirror_for_save();
+             if (ok) {
+ #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+@@ -521,6 +543,26 @@ static int boot_state_save_buffer_ex(const CPUState* cpu, uint32_t bios_checksum
+     return 1;
+ }
+ 
++/* Raw save into a buffer the caller keeps between saves (a snapshot ring:
++ * no 12 MiB allocation, and no first-touch page faults, per snapshot).
++ * *io_data / *io_cap may be NULL / 0 the first time and may grow. */
++int boot_state_save_buffer_reuse(const CPUState* cpu, uint32_t bios_checksum,
++                                 uint32_t entry_pc, uint8_t** io_data,
++                                 size_t* io_cap, size_t* out_len) {
++    BsOut o;
++    int ok;
++    if (!io_data || !io_cap || !out_len) return 0;
++    memset(&o, 0, sizeof o);
++    o.no_zlib = 1;
++    o.data = *io_data;
++    o.cap = *io_data ? *io_cap : 0;
++    ok = boot_state_save_to(&o, cpu, bios_checksum, entry_pc);
++    *io_data = o.data;
++    *io_cap = o.cap;
++    *out_len = ok ? o.len : 0;
++    return ok;
++}
++
+ int boot_state_save_buffer(const CPUState* cpu, uint32_t bios_checksum,
+                            uint32_t entry_pc, uint8_t** out_data,
+                            size_t* out_len) {
+@@ -622,6 +664,7 @@ static int apply_section(uint32_t tag, const uint8_t* p, uint32_t len,
+     case BS_SEC_GPU:
+         return gpu_snapshot_read(p, len);
+     case BS_SEC_VRAM: {
++        { extern int g_mod_memory_snapshot_lite; if (g_mod_memory_snapshot_lite) return 1; }
+         if (len != VRAM_SIZE) return 0;
+ #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+         /* Wire == host layout: upload straight from the section buffer. */
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
 index f12160a7..c20c3b4e 100644
 --- a/runtime/src/cdrom.c
@@ -923,7 +1160,7 @@ index 50f466dc..b8dbd1b9 100644
      if (is_cue(r.picked)) {
          const CueSheet sheet = parse_cue_sheet(r.picked);
 diff --git a/runtime/src/dma.c b/runtime/src/dma.c
-index a75dc88b..07945ee1 100644
+index a75dc88b..73417288 100644
 --- a/runtime/src/dma.c
 +++ b/runtime/src/dma.c
 @@ -515,6 +515,42 @@ static void start_async_cdrom_transfer(void) {
@@ -969,7 +1206,25 @@ index a75dc88b..07945ee1 100644
  static void finish_async_cdrom_transfer(uint32_t final_addr) {
      finish_cdrom_dma_capture(final_addr, 1);
      DMAAsyncChannel *a = &cdrom_async;
-@@ -717,6 +753,23 @@ static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
+@@ -696,6 +732,8 @@ static void execute_ch1_mdec_out(void) {
+     complete_transfer(1);
+ }
+ 
++uint32_t psx_gpu_list_read_word(uint32_t address);   /* memory.c */
++
+ static uint32_t gpu_ll_resolve_address(void *opaque, uint32_t address) {
+     (void)opaque;
+     return psx_mod_gpu_dma_resolve_address(address);
+@@ -703,7 +741,7 @@ static uint32_t gpu_ll_resolve_address(void *opaque, uint32_t address) {
+ 
+ static uint32_t gpu_ll_read_word(void *opaque, uint32_t address) {
+     (void)opaque;
+-    return psx_read_word(address);
++    return psx_gpu_list_read_word(address);
+ }
+ 
+ static void gpu_ll_observe_header(void *opaque, uint32_t addr,
+@@ -717,6 +755,23 @@ static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
  
      gpu_ws_validate_linked_list_node(addr, num_words);
      gpu_set_gp0_linked_list_node(addr, num_words);
@@ -980,7 +1235,7 @@ index a75dc88b..07945ee1 100644
 +         * relocates wrongly, builds quads whose command byte is a colour
 +         * overflow). Skip the whole node, keeping the chain, instead of
 +         * letting the GPU parse its coordinates as commands. */
-+        uint32_t op = psx_read_word(addr + 4u) >> 24;
++        uint32_t op = psx_gpu_list_read_word(addr + 4u) >> 24;
 +        if ((op >= 0xC0u && op <= 0xDFu) || (op >= 0x03u && op <= 0x1Eu) ||
 +            op == 0xE0u || op >= 0xE7u) {
 +            static unsigned warned;
@@ -993,7 +1248,7 @@ index a75dc88b..07945ee1 100644
      return 1;
  }
  
-@@ -751,6 +804,7 @@ static void start_async_gpu_linked_list(void) {
+@@ -751,6 +806,7 @@ static void start_async_gpu_linked_list(void) {
          return;
      }
      uint32_t start_addr = psx_mod_gpu_dma_resolve_address(channels[2].madr);
@@ -1001,7 +1256,7 @@ index a75dc88b..07945ee1 100644
      gpu_ws_begin_linked_list();
      /* This scan only prepares optional widescreen grouping. It does not send
       * packets to GP0. The event-driven walker below performs every guest-visible
-@@ -1477,6 +1531,7 @@ int dma_snapshot_read(const uint8_t *p, uint32_t len) {
+@@ -1477,6 +1533,7 @@ int dma_snapshot_read(const uint8_t *p, uint32_t len) {
          if (!dma_r_delay(&r, &delayed_complete[i])) return 0;
      if (gpu_ll_was_active) gpu_ws_end_linked_list();
      if (gpu_linked_list.active) {
@@ -1009,19 +1264,81 @@ index a75dc88b..07945ee1 100644
          gpu_ws_begin_linked_list();
          gpu_ws_prepass_linked_list(gpu_linked_list.start_addr);
          gpu_ws_restore_linked_list_rank(gpu_linked_list.empty_rank);
+diff --git a/runtime/src/dma_gpu_ll.c b/runtime/src/dma_gpu_ll.c
+index e102b03a..a30add2e 100644
+--- a/runtime/src/dma_gpu_ll.c
++++ b/runtime/src/dma_gpu_ll.c
+@@ -14,6 +14,20 @@ static uint32_t resolve_address(const DMAGPULinkedListOps *ops, void *opaque,
+     return ops->resolve_address ? ops->resolve_address(opaque, address) : address;
+ }
+ 
++/* Packets in mod packet memory (a plugin's own drawing, outside the console's
++ * RAM) take no console time: what a plugin draws -- or leaves out, as the
++ * view an online player does not see -- must not move the game's timing. */
++/* Game opt-in: the whole list is consumed at once, a cycle after the game
++ * starts it (the console takes a cycle a word; the game then polls the GPU
++ * and DMA registers until it is done -- thousands of device services a
++ * frame for nothing a PC needs). */
++int g_dma_gpu_ll_instant = 0;
++
++static uint32_t node_cycles(uint32_t resolved_addr, uint32_t cycles) {
++    if (g_dma_gpu_ll_instant) return 0u;
++    return (resolved_addr & 0x1FFFFFFFu) >= 0x00800000u ? 0u : cycles;
++}
++
+ static void finish(DMAGPULinkedList *state,
+                    const DMAGPULinkedListOps *ops, void *opaque) {
+     int hit_limit = state->hit_limit != 0;
+@@ -91,7 +105,7 @@ void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
+                 }
+                 state->current_addr = resolve_address(
+                     ops, opaque, state->next_addr);
+-                state->cycles_remaining = DMA_GPU_LL_HEADER_CYCLES;
++                state->cycles_remaining = node_cycles(state->current_addr, DMA_GPU_LL_HEADER_CYCLES);
+             }
+         } else if (state->phase == DMA_GPU_LL_PHASE_SETUP) {
+             state->emit_node = ops->begin_node
+@@ -99,7 +113,7 @@ void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
+                       opaque, state->current_addr, state->word_count) != 0)
+                 : 1u;
+             state->phase = DMA_GPU_LL_PHASE_PAYLOAD;
+-            state->cycles_remaining = 1u;
++            state->cycles_remaining = node_cycles(state->current_addr, 1u);
+         } else if (state->phase == DMA_GPU_LL_PHASE_PAYLOAD) {
+             uint32_t word_addr = resolve_address(
+                 ops, opaque, state->current_addr + 4u +
+@@ -113,7 +127,7 @@ void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
+             state->total_words++;
+ 
+             if (state->payload_index < state->word_count) {
+-                state->cycles_remaining = 1u;
++                state->cycles_remaining = node_cycles(state->current_addr, 1u);
+             } else if (state->next_addr == 0x00FFFFFFu) {
+                 finish(state, ops, opaque);
+                 return;
+@@ -121,7 +135,7 @@ void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
+                 state->phase = DMA_GPU_LL_PHASE_HEADER;
+                 state->current_addr = resolve_address(
+                     ops, opaque, state->next_addr);
+-                state->cycles_remaining = DMA_GPU_LL_HEADER_CYCLES;
++                state->cycles_remaining = node_cycles(state->current_addr, DMA_GPU_LL_HEADER_CYCLES);
+             }
+         } else {
+             state->hit_limit = 1;
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index b2857352..108919b8 100644
+index b2857352..954fe478 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
-@@ -72,6 +72,7 @@ static Gp0State gp0_state;
+@@ -72,6 +72,8 @@ static Gp0State gp0_state;
  static uint64_t gp0_write_count;
  static uint64_t gp0_nop_count, gp0_fill_count, gp0_draw_count, gp0_env_count, gp0_copy_count;
  static uint32_t gp0_cmd_buf[16];   /* max fixed-length command is 12 words */
++uint32_t psx_gpu_list_read_word(uint32_t address);   /* memory.c */
 +static int s_list_mute;             /* psx_mod_set_list_mute */
  static int      gp0_words_collected;
  static int      gp0_words_needed;
  static uint32_t gp0_next_source_addr = 0xFFFFFFFFu;
-@@ -1562,6 +1563,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
+@@ -1562,6 +1564,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
  int psx_ws_cull_bltz(uint32_t v) {
      return ((int32_t)v < -psx_ws_x_margin()) ? 1 : 0;
  }
@@ -1038,7 +1355,7 @@ index b2857352..108919b8 100644
  int psx_ws_cull_vxrange(uint32_t x, uint32_t imm) {
      int32_t margin = psx_ws_x_margin();
      uint32_t bound = (uint32_t)(int32_t)(int16_t)(uint16_t)imm;
-@@ -2856,12 +2867,109 @@ static void ws_clear_tagged_rect_reveal(int y, int h) {
+@@ -2856,12 +2868,109 @@ static void ws_clear_tagged_rect_reveal(int y, int h) {
   * a guessed finite-map side here: MMX6's authored layers enter the reveal at
   * different times, so the side guess produced a moving black trim over valid
   * stage art. A stale reveal tile is safer than deleting submitted content. */
@@ -1149,7 +1466,7 @@ index b2857352..108919b8 100644
      if (word_count == 0) {
          gp0_ot_rank = gp0_ot_rank == 0xFFFFu ? 0u
                                               : (uint16_t)(gp0_ot_rank + 1u);
-@@ -2870,6 +2978,7 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
+@@ -2870,6 +2979,7 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
  
  void gpu_ws_end_linked_list(void) {
      gp0_ot_rank = 0xFFFFu;
@@ -1157,7 +1474,7 @@ index b2857352..108919b8 100644
  }
  
  void gpu_ws_restore_linked_list_rank(uint32_t rank) {
-@@ -2879,6 +2988,11 @@ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
+@@ -2879,6 +2989,11 @@ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
  
  /* Horizontal display range (GP1(06h)) */
  static uint32_t h_display_x1;
@@ -1169,7 +1486,37 @@ index b2857352..108919b8 100644
  static uint32_t h_display_x2;
  
  /* Vertical display range (GP1(07h)) */
-@@ -3547,6 +3661,13 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
+@@ -3512,7 +3627,29 @@ int gpu_display_is_depth24(void) {
+     return (int)(display_depth & 1u);
+ }
+ 
++static void gpu_get_display_info_compute(GpuDisplayInfo* out);
++
++/* Memo: the widescreen pass asks for the display size for every primitive,
++ * and the answer only changes with the display registers. */
+ void gpu_get_display_info(GpuDisplayInfo* out) {
++    static uint32_t key[12];
++    static GpuDisplayInfo memo;
++    static int have;
++    const uint32_t now[12] = {
++        (uint32_t)display_area_x, (uint32_t)display_area_y, (uint32_t)display_depth,
++        (uint32_t)display_disabled, (uint32_t)hres1, (uint32_t)hres2,
++        (uint32_t)h_display_x1, (uint32_t)h_display_x2, (uint32_t)v_display_y1,
++        (uint32_t)v_display_y2, (uint32_t)video_mode | ((uint32_t)vres << 8),
++        (uint32_t)g_psx_display_full_frame };
++    if (!have || memcmp(key, now, sizeof key) != 0) {
++        gpu_get_display_info_compute(&memo);
++        memcpy(key, now, sizeof key);
++        have = 1;
++    }
++    *out = memo;
++}
++
++static void gpu_get_display_info_compute(GpuDisplayInfo* out) {
+     out->display_x = display_area_x;
+     out->display_y = display_area_y;
+     out->depth24   = (int)(display_depth & 1u);
+@@ -3547,6 +3684,13 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
      PsxDisplayVerticalLayout vertical = psx_display_vertical_layout(
          video_mode != 0, v_display_y1, v_display_y2);
      uint32_t h = psx_display_source_height(vertical, 240u);
@@ -1183,7 +1530,7 @@ index b2857352..108919b8 100644
      uint32_t screen_h = vertical.range_set ? vertical.canvas_height : h;
      uint32_t screen_origin_y = vertical.valid ? vertical.canvas_origin_y : 0u;
      uint32_t screen_source_skip_y = vertical.valid ? vertical.source_skip_y : 0u;
-@@ -4251,6 +4372,8 @@ static void gp0_exec_textured_quad(void) {
+@@ -4251,6 +4395,8 @@ static void gp0_exec_textured_quad(void) {
      }
  }
  
@@ -1192,7 +1539,7 @@ index b2857352..108919b8 100644
  /* Execute shaded textured triangle (GP0 0x34-0x37) */
  static void gp0_exec_shaded_textured_tri(void) {
      int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
-@@ -4291,9 +4414,13 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4291,9 +4437,13 @@ static void gp0_exec_shaded_textured_tri(void) {
      prepare_precise_triangle(1, 4, 7,
                               vx, vy);
      prepare_texture_triangle(1, 4, 7);
@@ -1207,7 +1554,7 @@ index b2857352..108919b8 100644
              gr_set_precise_triangle(1,
                  (int32_t)((xy[0] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[1] + draw_offset_y) * 65536.0f),
-@@ -4302,12 +4429,27 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4302,12 +4452,27 @@ static void gp0_exec_shaded_textured_tri(void) {
                  (int32_t)((xy[4] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[5] + draw_offset_y) * 65536.0f));
              gr_set_perspective_triangle(1, q[0], q[1], q[2]);
@@ -1235,7 +1582,7 @@ index b2857352..108919b8 100644
      if (host_bank) (void)gl_renderer_select_texture_bank(0);
  }
  
-@@ -4708,9 +4850,11 @@ static void gp0_exec_draw_area_tl(void) {
+@@ -4708,9 +4873,11 @@ static void gp0_exec_draw_area_tl(void) {
      uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
      draw_area_left = param & 0x3FF;
      draw_area_top  = (param >> 10) & 0x3FF;
@@ -1249,7 +1596,7 @@ index b2857352..108919b8 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4721,9 +4865,11 @@ static void gp0_exec_draw_area_br(void) {
+@@ -4721,9 +4888,11 @@ static void gp0_exec_draw_area_br(void) {
      uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
      draw_area_right  = param & 0x3FF;
      draw_area_bottom = (param >> 10) & 0x3FF;
@@ -1263,7 +1610,7 @@ index b2857352..108919b8 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4737,6 +4883,8 @@ static void gp0_exec_draw_offset(void) {
+@@ -4737,6 +4906,8 @@ static void gp0_exec_draw_offset(void) {
      if (draw_offset_y < g_doff_min_this) g_doff_min_this = draw_offset_y;
      if (draw_offset_y > g_doff_max_this) g_doff_max_this = draw_offset_y;
      g_doff_cnt_this++;
@@ -1272,7 +1619,43 @@ index b2857352..108919b8 100644
      /* Native-wide mirrors framebuffer draws into a separate wide surface (canonical
       * VRAM stays faithful); the renderer needs the live draw offset to translate
       * into surface-local coords, so keep gr_set_draw_offset current. */
-@@ -5544,6 +5692,18 @@ static void gp0_execute_command(void) {
+@@ -5125,7 +5296,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+             ws_ui_prepass_node_count = 0;
+             return;
+         }
+-        uint32_t header = psx_read_word(addr);
++        uint32_t header = psx_gpu_list_read_word(addr);
+         uint32_t num_words = (header >> 24) & 0xFFu;
+         if (ws_ui_prepass_node_count >= WS_UI_PREPASS_NODE_MAX) {
+             ws_ui_reject.cap++;
+@@ -5136,7 +5307,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+         uint32_t payload[255];
+         uint32_t first_addr = psx_mod_gpu_dma_resolve_address(addr + 4u);
+         for (uint32_t i = 0; i < num_words; i++) {
+-            payload[i] = psx_read_word(psx_mod_gpu_dma_resolve_address(
++            payload[i] = psx_gpu_list_read_word(psx_mod_gpu_dma_resolve_address(
+                 first_addr + i * 4u));
+         }
+         WsUiPrepassNode *node =
+@@ -5152,7 +5323,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+                 psx_mod_gpu_dma_resolve_address(addr + 4u);
+             uint32_t offset = 0;
+             while (offset < num_words) {
+-                uint32_t first = psx_read_word(
++                uint32_t first = psx_gpu_list_read_word(
+                     psx_mod_gpu_dma_resolve_address(
+                         word_addr + offset * 4u));
+                 uint8_t op = (uint8_t)(first >> 24);
+@@ -5164,7 +5335,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+                 if (op >= 0xA0u && op <= 0xBFu) break;
+                 uint32_t words[12] = {0};
+                 for (int i = 0; i < count && i < 12; i++) {
+-                    words[i] = psx_read_word(
++                    words[i] = psx_gpu_list_read_word(
+                         psx_mod_gpu_dma_resolve_address(
+                             word_addr + (offset + (uint32_t)i) * 4u));
+                 }
+@@ -5544,6 +5715,18 @@ static void gp0_execute_command(void) {
          ws_note_overhang(opcode);   /* 2D-only-scene classifier world signal */
      }
  
@@ -1291,7 +1674,7 @@ index b2857352..108919b8 100644
      /* Categorize for diagnostics */
      if (opcode <= 0x01) gp0_nop_count++;
      else if (opcode == 0x02) gp0_fill_count++;
-@@ -5900,11 +6060,13 @@ static void gpu_write_gp0_body(uint32_t val) {
+@@ -5900,11 +6083,13 @@ static void gpu_write_gp0_body(uint32_t val) {
      int word_count = gp0_command_word_count(opcode);
  
      if (word_count == 0) {
@@ -2720,10 +3103,18 @@ index 0dc8e173..a147bcdb 100644
      if (!handle) return 0;
      auto* reader = static_cast<PS1::ISOReader*>(handle);
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index a5241863..15d5fb64 100644
+index a5241863..1a74508f 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
-@@ -120,6 +120,9 @@ extern "C" void psx_game_codegen_relaunch_or_exit(const char* disc_path);
+@@ -16,6 +16,7 @@
+ #include "fntrace.h"
+ #include "text_xlate.h"
+ #include "boot_state.h"
++#include "psx_modrb.h"
+ #include "bios_hle.h"
+ #include "bios_hle_plan.h"
+ #include "psx_bios_known_images.h"
+@@ -120,6 +121,9 @@ extern "C" void psx_game_codegen_relaunch_or_exit(const char* disc_path);
  #if defined(PSX_HAS_CODEGEN_SETUP_HOST)
  extern "C" void psx_game_codegen_forward_if_built(int argc, char** argv);
  #endif
@@ -2733,7 +3124,77 @@ index a5241863..15d5fb64 100644
  #include "psx_sdl.h"
  #if defined(PSX_SDL3)
  /*
-@@ -1279,6 +1282,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
+@@ -523,6 +527,14 @@ static uint64_t s_fps_last_frame = 0;
+ static std::string s_fps_base_title;
+ static int      s_fps_telemetry_enabled = -1; /* -1 = unread env */
+ static FramePacer s_frame_pacer = { 0 };
++/* A trusted plugin moves the frame cadence later by `ms` once (online play:
++ * the PC that runs ahead of the other gives it time to catch up). A wait
++ * inside a frame would only be absorbed by the pacer's next sleep. */
++extern "C" void psx_mod_pacer_shift_ms(double ms) {
++    if (!s_frame_pacer.next_deadline || ms <= 0.0) return;
++    s_frame_pacer.next_deadline +=
++        (uint64_t)((double)SDL_GetPerformanceFrequency() * (ms / 1000.0));
++}
+ static int      s_turbo_present_skip = 0;
+ static int      s_fmv_skip_present_skip = 0;
+ /* Netplay + depth24: present every other vblank (admit still every tick). */
+@@ -538,6 +550,17 @@ static int      s_d24_cutover_blank = 0;
+ /* Savestate restore → audio pump: re-anchor last_cycles (declared early so
+  * psx_frontend_on_savestate_loaded can set it). */
+ static int      g_audio_cycle_resync = 0;
++/* The guest cycle the SPU has been rendered up to. Samples are counted on the
++ * absolute clock (cycle / 768), so the SPU's position is a function of the
++ * machine's clock alone: a restored state continues from its own clock (the
++ * restore hooks anchor this), exactly as the run it was saved from did. A
++ * private remainder, lost on restore, left the game's envelope reads a sample
++ * or two apart from the original run. */
++static uint64_t s_audio_last_cycles = 0;
++/* Game opt-in (trusted plugin): never drop a backlog of samples -- every
++ * machine renders all the guest's samples (the game reads the envelopes). */
++extern "C" { int g_psx_audio_no_drop = 0; }
++extern "C" { extern void (*g_psx_pre_snapshot_hook)(void); }   /* psx_cycles.c */
+ 
+ static void smooth_60_reset(void) {
+     g_smooth_60_state.previous_source.clear();
+@@ -1040,6 +1063,7 @@ extern "C" void psx_frontend_on_savestate_loaded(void) {
+     s_fps_last_frame = 0;
+     /* Re-anchor guest-cycle→sample budgeting (pump clears queued PCM too). */
+     g_audio_cycle_resync = 1;
++    { extern uint64_t psx_cycle_count; s_audio_last_cycles = psx_cycle_count; }
+     /* Depth24 FMV: drop ephemeral present hold/cutover so restored VRAM shows.
+      * Upload span came back with the GPU snap; treat MDEC as already active if
+      * depth24 is on so we don't full-black the first post-load presents. */
+@@ -1069,6 +1093,7 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
+     const int media = gpu_display_is_depth24() || mdec_recently_active(8) ||
+                       cdrom_fmv_stream_pending() || cdrom_xa_stream_active();
+     g_audio_cycle_resync = 1;
++    { extern uint64_t psx_cycle_count; s_audio_last_cycles = psx_cycle_count; }
+     gpu_depth24_on_savestate_loaded();
+     s_d24_cutover_blank = 0;
+     if (media) {
+@@ -1077,10 +1102,16 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
+         s_disabled_frame_presented = false;
+         s_force_present_after_load = true;
+     }
+-    gl_renderer_restage_vram_after_savestate();
+-    vk_renderer_restage_vram_after_savestate();
+-    /* Dual-raster: restaged FBO must reach the window; drop hold-last. */
+-    gl_renderer_invalidate_present();
++    /* A plugin's rollback (psx_modrb) does not save the video memory: the
++     * renderer's VRAM is the live one, and the CPU-side mirror is not current
++     * (pushing it to the renderer replaced the textures with stale data and
++     * flashed the raw 4:3 framebuffer). */
++    if (!psx_modrb_enabled()) {
++        gl_renderer_restage_vram_after_savestate();
++        vk_renderer_restage_vram_after_savestate();
++        /* Dual-raster: restaged FBO must reach the window; drop hold-last. */
++        gl_renderer_invalidate_present();
++    }
+     /* §63: guest SIO came from the snap — drop Live pad-edge trackers. */
+     psx_netplay_on_rb_snap_loaded();
+ }
+@@ -1279,6 +1310,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
  static int           g_video_win_w    = 0;    /* 0 = fit the display; see clamp_window_aspect */
  static bool          g_audio_spu_hq   = false; /* SPU float-shadow (env overrides) */
  static int           g_audio_freq     = 44100; /* host device request */
@@ -2741,7 +3202,7 @@ index a5241863..15d5fb64 100644
  static int           g_auto_skip_fmv  = 0;   /* skip FMVs the instant they're detected */
  /* Local rewind is opt-in: the snap ring is whole-machine state on a frame
   * cadence, too much to charge every host for a feature many never open. */
-@@ -1661,6 +1665,14 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
+@@ -1661,6 +1693,14 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
      return 1;
  }
  
@@ -2756,7 +3217,7 @@ index a5241863..15d5fb64 100644
  extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
      if (enabled != 0 && enabled != 1) {
          std::fprintf(stderr,
-@@ -2394,6 +2406,61 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
+@@ -2394,6 +2434,61 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
      return exe_dir;
  }
  
@@ -2818,7 +3279,7 @@ index a5241863..15d5fb64 100644
  static std::filesystem::path resolve_existing_runtime_path(const char* requested,
                                                             const char* argv0) {
      namespace fs = std::filesystem;
-@@ -2834,6 +2901,12 @@ static std::filesystem::path resolve_disc_for_runtime(const std::filesystem::pat
+@@ -2834,6 +2929,12 @@ static std::filesystem::path resolve_disc_for_runtime(const std::filesystem::pat
                                                        const char* disc_override,
                                                        const std::string& game_id,
                                                        const char* argv0) {
@@ -2831,7 +3292,78 @@ index a5241863..15d5fb64 100644
      if (disc_override && disc_override[0]) {
          std::filesystem::path p = normalize_disc_path_for_launch(disc_override);
          return validate_disc_for_launch(p, game_id) ? p : std::filesystem::path{};
-@@ -5890,6 +5963,70 @@ done:
+@@ -3471,32 +3572,27 @@ static void sdl_audio_pump(bool discard_output = false) {
+      * produced vs 44100/s consumed = recurring ring underruns no +/-0.5%
+      * DRC trim could absorb during jitter spikes). */
+     extern uint64_t psx_cycle_count;
+-    static uint64_t last_cycles = 0;
+-    static uint64_t cycle_carry = 0;
+     const uint64_t now_cycles = psx_cycle_count;
+     if (g_audio_cycle_resync) {
+-        last_cycles = now_cycles;
+-        cycle_carry = 0;
++        /* A state was restored: the hooks anchored s_audio_last_cycles at the
++         * restored clock; only the host queue is reset here. */
+         g_audio_cycle_resync = 0;
+         if (legacy && sdl_audio_device)
+             psx_sdl_audio_clear(sdl_audio_device);
+         else
+             g_audio_unmute_resync = 1; /* skip mute-drain underrun reports */
+-        return;
+     }
+-    if (last_cycles == 0) last_cycles = now_cycles;
+-    uint64_t delta = (now_cycles - last_cycles) + cycle_carry;
+-    last_cycles = now_cycles;
+-    int frames = (int)(delta / 768u);
+-    cycle_carry = delta % 768u;
++    if (s_audio_last_cycles == 0 || s_audio_last_cycles > now_cycles)
++        s_audio_last_cycles = now_cycles;
++    int frames = (int)(now_cycles / 768u - s_audio_last_cycles / 768u);
++    s_audio_last_cycles = now_cycles;
+     if (frames <= 0) return;
+-    if (frames > 2048 && !netplay) {
++    if (frames > 2048 && !netplay && !g_psx_audio_no_drop) {
+         /* Offline: a burst beyond one buffer (e.g. right after an unmute or a
+          * long stall) renders one full buffer and DROPs the remainder of the
+          * debt — mute-model freeze rather than time-compressing a backlog.
+          * Netplay never drops: both peers must consume the same guest debt. */
+         frames = 2048;
+-        cycle_carry = 0;
+     }
+ 
+     audio_trace_event(AUDIO_EV_RENDER, (uint32_t)frames, queued);
+@@ -3649,6 +3745,17 @@ struct RuntimePerfState {
+ 
+ static RuntimePerfState g_runtime_perf;
+ 
++/* Arm the [BENCH] window from a trusted plugin: `after` frames from now, for
++ * `frames` frames (a test scenario that knows when its scene is on). */
++static uint64_t runtime_perf_frame_now() { extern uint64_t s_frame_count; return s_frame_count; }
++extern "C" void psx_runtime_perf_bench_arm(uint32_t after, uint32_t frames) {
++    g_runtime_perf.bench_start_frame = runtime_perf_frame_now() + after;
++    g_runtime_perf.bench_end_frame = g_runtime_perf.bench_start_frame + frames;
++    g_runtime_perf.bench_configured = true;
++    g_runtime_perf.bench_started = false;
++    g_runtime_perf.bench_reported = false;
++}
++
+ static bool runtime_perf_parse_window(const char *text, uint64_t *start,
+                                       uint64_t *end) {
+     if (!text || !text[0]) return false;
+@@ -3967,6 +4074,12 @@ static AudioGate s_audio_gate = AUDIO_GATE_NORMAL;
+ 
+ /* Invoked from the guest-derived VBlank edge (interrupts.c). */
+ static void sdl_audio_pump_midframe(void) {
++    /* A replay of frames (rollback, self-check): the SPU advances exactly as
++     * in the run being replayed, its output discarded. */
++    if (psx_netplay_is_resimulating() || psx_selfcheck_resim_active()) {
++        sdl_audio_pump(true);
++        return;
++    }
+     /* Device optional: SPU still advances from guest cycles (netplay-safe). */
+     switch (s_audio_gate) {
+     case AUDIO_GATE_MUTED:
+@@ -5890,6 +6003,70 @@ done:
      freeze_heartbeat_set_paused(0);
  }
  
@@ -2902,7 +3434,7 @@ index a5241863..15d5fb64 100644
  static void sample_pad_into_sio(int override) {
      /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
      if (override < 0) {
-@@ -5897,8 +6034,10 @@ static void sample_pad_into_sio(int override) {
+@@ -5897,8 +6074,10 @@ static void sample_pad_into_sio(int override) {
          if (psx_selfcheck_mash_override(&mash))
              override = (int)mash;
      }
@@ -2913,7 +3445,7 @@ index a5241863..15d5fb64 100644
          return;
      }
      int n = g_offline_pad_count;
-@@ -5926,6 +6065,7 @@ static void sample_pad_into_sio(int override) {
+@@ -5926,6 +6105,7 @@ static void sample_pad_into_sio(int override) {
                                   0, 0);
          }
      }
@@ -2921,7 +3453,7 @@ index a5241863..15d5fb64 100644
  }
  
  static void sample_headless_pad_into_sio(int override) {
-@@ -6773,12 +6913,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6773,12 +6953,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Check debug server input override. */
      int override = debug_server_get_input_override();
@@ -2936,7 +3468,63 @@ index a5241863..15d5fb64 100644
  #endif
  
      {
-@@ -8219,7 +8360,12 @@ namespace {
+@@ -7082,6 +7263,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+          * the arm writes SIO once, host-latched, and would not replay. */
+         psx_selfcheck_finish_frame(
+             (g_offline_pad_count >= 3 && !sio_get_multitap()) ? 1 : 0);
++        psx_modrb_finish_frame();   /* a plugin's rollback: one tick per boundary */
+     }
+     if (!g_headless) update_controller_rumble();
+ 
+@@ -7191,6 +7373,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+     if (!psx_netplay_is_resimulating() && !psx_selfcheck_resim_active()) {
+         sdl_audio_update(fmv_skip_active,
+                          turbo_loads_active && g_turbo_audio_sink_enabled);
++    } else {
++        sdl_audio_pump(true);   /* the SPU's state advances, no output */
+     }
+ #endif
+ 
+@@ -7361,7 +7545,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+          * vsync-light box). Re-stamp the ring's input mark to measure from here.
+          * Self-check record keeps pads boundary-latched (netplay tick
+          * semantics) — the mid-frame re-sample would fork the resim. */
+-        if (g_low_latency_input && !psx_selfcheck_input_locked()) {
++        if (g_low_latency_input && !psx_selfcheck_input_locked() && !psx_modrb_enabled()) {
+             SDL_GameControllerUpdate();  /* refresh pad state after the wait */
+             SDL_PumpEvents();            /* refresh keyboard state */
+             sample_pad_into_sio(override);
+@@ -7408,6 +7592,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+      * live every vblank. Frames at/below the watermark are a rewound
+      * re-play; hold-last exactly as before so §63 edge-input re-show
+      * (pad-log DUP_SIO) stays impossible. */
++    /* A plugin's rollback replay (psx_modrb): those frames were already
++     * shown once (or are drawn muted); keep the last image on screen. */
++    if (psx_modrb_resimulating()) {
++        netplay_hold_last_present_tick();
++        return ep;
++    }
+     if (psx_netplay_is_resimulating()) {
+         uint32_t rem = psx_netplay_rb_confirmed_remaining();
+         uint32_t sim = psx_netplay_sim_tick();
+@@ -7920,6 +8110,7 @@ static void sdl_vblank_present(void) {
+      * further guest progress. Longjmps on success — keeps every resim load
+      * on the same VBlank boundary (BB fast-poll tails forked #2 vs #3). */
+     psx_selfcheck_flush_load();
++    psx_modrb_flush_load();   /* a plugin's rollback rewind (longjmps) */
+     if (!ep.do_epilogue)
+         return;
+     if (!psx_return_to_lobby_requested())
+@@ -7931,6 +8122,8 @@ static void sdl_vblank_present(void) {
+         return;
+     if (psx_netplay_is_resimulating() || psx_netplay_rb_tip_holding())
+         return;
++    if (psx_modrb_resimulating())
++        return;   /* replayed frames are not paced */
+     if (!gpu_display_is_depth24() && psx_netplay_catchup_budget() > 0) {
+         psx_netplay_catchup_consume_frame();
+         return;
+@@ -8219,7 +8412,12 @@ namespace {
          // netplay-capable titles; ordinary offline disc verification is
          // strictly serial/header/optional-CRC based.
          if (!id.opened || !id.has_header)                            out->verdict = 3; // bad
@@ -2950,7 +3538,7 @@ index a5241863..15d5fb64 100644
          else if (id.expected_crc_given && id.crc_computed && !id.crc_matches) out->verdict = 2; // warn
          else if (g_lnch_netplay_available && !id.netplay_ok)         out->verdict = 2; // TOC/cue
          else                                                          out->verdict = 1; // ok
-@@ -13030,6 +13176,7 @@ int main(int argc, char** argv) {
+@@ -13030,6 +13228,7 @@ int main(int argc, char** argv) {
                      gc.netplay_required_disc_fps[i];
              }
              if (!gc.discs.empty()) resolved_disc = gc.discs.front();
@@ -2958,7 +3546,7 @@ index a5241863..15d5fb64 100644
              if (gc.runtime.has_memcard_dir)  memcard_dir   = gc.runtime.memcard_dir;
              if (gc.runtime.has_window_title) window_title  = gc.runtime.window_title;
              if (gc.runtime.has_debug_port)   debug_port    = gc.runtime.debug_port;
-@@ -14203,6 +14350,11 @@ int main(int argc, char** argv) {
+@@ -14203,6 +14402,11 @@ int main(int argc, char** argv) {
                      resolved_disc = cli_disc;
              }
              std::string rui_initial_disc = resolved_disc.string();
@@ -2970,7 +3558,7 @@ index a5241863..15d5fb64 100644
              std::string rui_title = (game_name.empty() ? std::string("PSX") : game_name)
                                       + " - Launcher";
  
-@@ -14927,6 +15079,7 @@ int main(int argc, char** argv) {
+@@ -14927,6 +15131,7 @@ int main(int argc, char** argv) {
      if (game_config_path || disc_override_path || !resolved_disc.empty()) {
          resolved_disc = resolve_disc_for_runtime(
              resolved_disc, disc_override_path, game_id, argv[0]);
@@ -2978,11 +3566,188 @@ index a5241863..15d5fb64 100644
          if (game_config_path && resolved_disc.empty()) {
              std::fprintf(stderr, "psxrecomp: no disc image selected; exiting.\n");
              return 1;
+@@ -15498,6 +15703,7 @@ session_reboot:
+   if (g_headless) {
+     audio_trace_init();
+     psx_set_midframe_audio_pump(sdl_audio_pump_midframe);
++    g_psx_pre_snapshot_hook = sdl_audio_pump_midframe;
+     sdl_audio_pump_midframe();
+   }
+ #endif
+@@ -15597,6 +15803,7 @@ session_reboot:
+      * depend on a successful host open (Win↔Linux aux/spu fork). Routed
+      * through the gated wrapper so turbo mute/sink still apply. */
+     psx_set_midframe_audio_pump(sdl_audio_pump_midframe);
++    g_psx_pre_snapshot_hook = sdl_audio_pump_midframe;
+     /* Establish the cycle-zero audio epoch before the first device deadline.
+      * Otherwise the first D-1 quiet-prefix service becomes the epoch and shifts
+      * every nominal 768-cycle sample boundary. */
 diff --git a/runtime/src/memory.c b/runtime/src/memory.c
-index 6f63240e..f1208476 100644
+index 6f63240e..9b1b5407 100644
 --- a/runtime/src/memory.c
 +++ b/runtime/src/memory.c
-@@ -138,6 +138,15 @@ static int mod_gpu_dma_memory_offset(uint32_t phys, uint32_t width,
+@@ -47,9 +47,76 @@ static uint8_t mod_memory[MOD_MEMORY_SIZE];
+ static uint32_t mod_memory_used;
+ static uint8_t mod_gpu_dma_memory[PSX_MOD_GPU_DMA_APERTURE_SIZE];
+ static uint32_t mod_gpu_dma_memory_used;
++/* Rollback snapshots leave the plugins' packet memory out: it is scratch,
++ * rebuilt by the plugins every frame (8 MB a snapshot otherwise). */
++int g_mod_memory_snapshot_lite = 0;
++
++/* Packet arenas a plugin rebuilds every frame (psx_mod_gpu_dma_set_live):
++ * a lite snapshot keeps only their live part. The packets of the frame the
++ * GPU is still to walk are needed -- the restored ordering tables point into
++ * them -- but the rest of an arena is scratch. */
++#define MOD_LIVE_MAX 8
++static struct { uint32_t off, cap, live; } s_mod_live[MOD_LIVE_MAX];
++static int s_mod_live_n;
++
++void psx_mod_gpu_dma_set_live(uint32_t address, uint32_t cap, uint32_t live) {
++    uint32_t off = (address & 0x1FFFFFFFu) - (PSX_MOD_GPU_DMA_APERTURE_BASE & 0x1FFFFFFFu);
++    int i;
++    if (live > cap) live = cap;
++    for (i = 0; i < s_mod_live_n; ++i)
++        if (s_mod_live[i].off == off) { s_mod_live[i].cap = cap; s_mod_live[i].live = live; return; }
++    if (s_mod_live_n < MOD_LIVE_MAX) {
++        s_mod_live[s_mod_live_n].off = off;
++        s_mod_live[s_mod_live_n].cap = cap;
++        s_mod_live[s_mod_live_n].live = live;
++        s_mod_live_n++;
++    }
++}
++
++uint32_t psx_mod_gpu_dma_get_live(uint32_t address) {
++    uint32_t off = (address & 0x1FFFFFFFu) - (PSX_MOD_GPU_DMA_APERTURE_BASE & 0x1FFFFFFFu);
++    int i;
++    for (i = 0; i < s_mod_live_n; ++i)
++        if (s_mod_live[i].off == off) return s_mod_live[i].live;
++    return 0;
++}
++
++/* The aperture's saved segments in a lite snapshot: everything allocated but
++ * the dead tails of the live arenas. Returns the count (<= 2*MOD_LIVE_MAX+1). */
++#define MOD_SEG_MAX (2 * MOD_LIVE_MAX + 1)
++static uint32_t s_seg_off[MOD_SEG_MAX], s_seg_len[MOD_SEG_MAX];
++static int mod_lite_segments(void) {
++    uint32_t cur = 0;
++    int n = 0;
++    for (;;) {
++        /* the next dead tail at or after cur */
++        uint32_t best = 0xFFFFFFFFu, best_end = 0;
++        int i;
++        for (i = 0; i < s_mod_live_n; ++i) {
++            uint32_t a = s_mod_live[i].off + s_mod_live[i].live;
++            uint32_t e = s_mod_live[i].off + s_mod_live[i].cap;
++            if (a >= cur && a < best && e <= mod_gpu_dma_memory_used) { best = a; best_end = e; }
++        }
++        if (best == 0xFFFFFFFFu) {
++            if (mod_gpu_dma_memory_used > cur && n < MOD_SEG_MAX) {
++                s_seg_off[n] = cur; s_seg_len[n] = mod_gpu_dma_memory_used - cur; n++;
++            }
++            return n;
++        }
++        if (best > cur && n < MOD_SEG_MAX) { s_seg_off[n] = cur; s_seg_len[n] = best - cur; n++; }
++        cur = best_end;
++    }
++}
++
+ uint32_t psx_mod_memory_snapshot_bytes(void) {
+-    return mod_memory_used || mod_gpu_dma_memory_used
+-        ? 16u + mod_memory_used + mod_gpu_dma_memory_used : 0u;
++    if (!mod_memory_used && !mod_gpu_dma_memory_used) return 0u;
++    if (g_mod_memory_snapshot_lite) {
++        uint32_t total = 16u + mod_memory_used + 4u;
++        int i, n = mod_lite_segments();
++        for (i = 0; i < n; ++i) total += 8u + s_seg_len[i];
++        return total + 4u + (uint32_t)s_mod_live_n * 12u;   /* + the live table */
++    }
++    return 16u + mod_memory_used + mod_gpu_dma_memory_used;
+ }
+ 
+ uint32_t psx_mod_memory_layout_cookie(void) {
+@@ -68,6 +135,26 @@ void psx_mod_memory_snapshot_write(uint8_t* out) {
+     pst_w_u32(&w, mod_memory_used);
+     pst_w_u32(&w, mod_gpu_dma_memory_used);
+     memcpy(out + 16u, mod_memory, mod_memory_used);
++    if (g_mod_memory_snapshot_lite) {
++        /* segment list, as counted by the bytes call just before */
++        uint8_t* q = out + 16u + mod_memory_used;
++        int i, n = mod_lite_segments();
++        uint32_t nn = (uint32_t)n;
++        memcpy(q, &nn, 4); q += 4;
++        for (i = 0; i < n; ++i) {
++            memcpy(q, &s_seg_off[i], 4); memcpy(q + 4, &s_seg_len[i], 4); q += 8;
++            memcpy(q, mod_gpu_dma_memory + s_seg_off[i], s_seg_len[i]); q += s_seg_len[i];
++        }
++        {   /* the arenas' live sizes, for the plugins after a restore */
++            uint32_t ln = (uint32_t)s_mod_live_n;
++            memcpy(q, &ln, 4); q += 4;
++            for (i = 0; i < s_mod_live_n; ++i) {
++                memcpy(q, &s_mod_live[i].off, 4); memcpy(q + 4, &s_mod_live[i].cap, 4);
++                memcpy(q + 8, &s_mod_live[i].live, 4); q += 12;
++            }
++        }
++        return;
++    }
+     memcpy(out + 16u + mod_memory_used, mod_gpu_dma_memory, mod_gpu_dma_memory_used);
+ }
+ 
+@@ -75,7 +162,26 @@ void psx_mod_memory_snapshot_write(uint8_t* out) {
+ int psx_mod_memory_snapshot_validate(const uint8_t* data, uint32_t size) {
+     PstR r;
+     uint32_t version, base, cpu_bytes, dma_bytes;
+-    if (!data || size < 16u || size != psx_mod_memory_snapshot_bytes()) return 0;
++    if (!data || size < 16u) return 0;
++    if (g_mod_memory_snapshot_lite) {   /* the segment list's own size */
++        uint32_t n, off = 16u + mod_memory_used, i;
++        if (size < off + 4u) return 0;
++        memcpy(&n, data + off, 4); off += 4u;
++        if (n > MOD_SEG_MAX) return 0;
++        for (i = 0; i < n; ++i) {
++            uint32_t so, sl;
++            if (size < off + 8u) return 0;
++            memcpy(&so, data + off, 4); memcpy(&sl, data + off + 4u, 4); off += 8u;
++            if (so > mod_gpu_dma_memory_used || sl > mod_gpu_dma_memory_used - so || size < off + sl) return 0;
++            off += sl;
++        }
++        {
++            uint32_t ln;
++            if (size < off + 4u) return 0;
++            memcpy(&ln, data + off, 4); off += 4u;
++            if (ln > MOD_LIVE_MAX || size != off + ln * 12u) return 0;
++        }
++    } else if (size != psx_mod_memory_snapshot_bytes()) return 0;
+     pst_r_init(&r, data, size);
+     return pst_r_u32(&r, &version) && pst_r_u32(&r, &base) &&
+            pst_r_u32(&r, &cpu_bytes) && pst_r_u32(&r, &dma_bytes) &&
+@@ -89,6 +195,26 @@ int psx_mod_memory_snapshot_read(const uint8_t* data, uint32_t size) {
+     cpu_bytes = mod_memory_used;
+     dma_bytes = mod_gpu_dma_memory_used;
+     memcpy(mod_memory, data + 16u, cpu_bytes);
++    if (g_mod_memory_snapshot_lite) {
++        uint32_t n, off = 16u + cpu_bytes, i;
++        memcpy(&n, data + off, 4); off += 4u;
++        for (i = 0; i < n; ++i) {
++            uint32_t so, sl;
++            memcpy(&so, data + off, 4); memcpy(&sl, data + off + 4u, 4); off += 8u;
++            memcpy(mod_gpu_dma_memory + so, data + off, sl); off += sl;
++        }
++        {
++            uint32_t ln, j;
++            memcpy(&ln, data + off, 4); off += 4u;
++            s_mod_live_n = (int)ln;
++            for (j = 0; j < ln; ++j, off += 12u) {
++                memcpy(&s_mod_live[j].off, data + off, 4);
++                memcpy(&s_mod_live[j].cap, data + off + 4u, 4);
++                memcpy(&s_mod_live[j].live, data + off + 8u, 4);
++            }
++        }
++        return 1;
++    }
+     memcpy(mod_gpu_dma_memory, data + 16u + cpu_bytes, dma_bytes);
+     return 1;
+ }
+@@ -138,11 +264,42 @@ static int mod_gpu_dma_memory_offset(uint32_t phys, uint32_t width,
          phys, width, mod_gpu_dma_memory_used, offset);
  }
  
@@ -2998,6 +3763,33 @@ index 6f63240e..f1208476 100644
  uint32_t psx_mod_gpu_dma_resolve_address(uint32_t address) {
      return psx_mod_gpu_dma_resolve_address_for(
          address, mod_gpu_dma_memory_used);
+ }
+ 
++/* A word of a GPU draw list, for the list walk and its pre-scan: straight
++ * from the console RAM or the plugins' packet memory (tens of thousands of
++ * words a frame; the general read path checks every one for MMIO, lockstep
++ * recording and tracing). Anything else falls back to that path. */
++extern int g_ls_mode;
++extern volatile int g_ds_recording;
++uint32_t psx_read_word(uint32_t addr);
++uint32_t psx_gpu_list_read_word(uint32_t address) {
++    uint32_t phys = address & 0x1FFFFFFFu;
++    if (g_ls_mode == 0 && !g_ds_recording) {
++        uint32_t v, off;
++        if (phys < 0x00800000u) {
++            off = phys & g_psx_ram_mask;
++            if (off <= g_psx_ram_mask - 3u) { memcpy(&v, ram + off, 4); return v; }
++        } else if (mod_gpu_dma_memory_offset(phys, 4u, &off)) {
++            memcpy(&v, mod_gpu_dma_memory + off, 4);
++            return v;
++        }
++    }
++    return psx_read_word(address);
++}
++
+ /* Exposed for inlined main-RAM load helpers in psx_cyc.h (VLC/decode hot path). */
+ uint8_t *g_psx_ram = ram;
+ /* PSX_LOAD_DELAY gate (default on). −1 = unread; 0/1 after first resolve. */
 diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
 index d5600377..0d9d0d84 100644
 --- a/runtime/src/mod_runtime.cpp
@@ -3205,13 +3997,25 @@ index d5600377..0d9d0d84 100644
  
  extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
 diff --git a/runtime/src/mod_texture_banks.c b/runtime/src/mod_texture_banks.c
-index d5767db1..f28e2f19 100644
+index d5767db1..702cc57c 100644
 --- a/runtime/src/mod_texture_banks.c
 +++ b/runtime/src/mod_texture_banks.c
-@@ -21,6 +21,13 @@ int mod_texture_bank_batchable(int immutable, int mask_check, int semi) {
+@@ -21,6 +21,25 @@ int mod_texture_bank_batchable(int immutable, int mask_check, int semi) {
          (semi == 0 || semi == 1 || semi == 3);
  }
  
++/* A word of a plugin's packet: straight from the packet memory (the suffix
++ * readers below take dozens of words per triangle; the general read path
++ * checks each for MMIO, tracing and lockstep recording). */
++uint8_t *psx_mod_gpu_dma_host_ptr(uint32_t address, uint32_t size);
++static inline uint32_t pk_rd(uint32_t address) {
++    const uint8_t *h = psx_mod_gpu_dma_host_ptr(address, 4u);
++    uint32_t v;
++    if (!h) return psx_mod_read_word(address);
++    memcpy(&v, h, 4);
++    return v;
++}
++
 +static int native_packet_batching;
 +void psx_mod_set_native_packet_batching(int enabled) { native_packet_batching = enabled != 0; }
 +int mod_native_packet_batchable(int mask_check, int semi) {
@@ -3222,7 +4026,7 @@ index d5767db1..f28e2f19 100644
  void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver) {
      resolve_bank = resolver;
  }
-@@ -75,13 +82,86 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
+@@ -75,15 +94,88 @@ uint16_t mod_texture_packet_bank(uint32_t source, const uint32_t* words, uint32_
      return 0;
  }
  
@@ -3244,17 +4048,17 @@ index d5767db1..f28e2f19 100644
 +        uint32_t magic;
 +        if (arenas[i].size < 108u || address < arenas[i].begin ||
 +            address - arenas[i].begin > arenas[i].size - 108u) continue;
-+        magic = psx_mod_read_word(source + 76u);
++        magic = pk_rd(source + 76u);
 +        if (magic != 0x48545556u && magic != 0x4854554Cu && magic != 0x48545542u) return 0;
 +        for (j = 0; j < 6u; ++j) {
-+            uint32_t bits = psx_mod_read_word(source + 80u + j * 4u);
++            uint32_t bits = pk_rd(source + 80u + j * 4u);
 +            float f;
 +            memcpy(&f, &bits, sizeof f);
 +            if (!isfinite(f) || f < -1.0f || f > 256.0f) return 0;
 +            uv[j] = f;
 +        }
 +        if (magic != 0x48545556u) {
-+            uint32_t w = psx_mod_read_word(source + 104u);
++            uint32_t w = pk_rd(source + 104u);
 +            lim[0] = (int)(w & 0xFFu);         lim[1] = (int)((w >> 8) & 0xFFu);
 +            lim[2] = (int)((w >> 16) & 0xFFu); lim[3] = (int)(w >> 24);
 +            if (lim[0] > lim[2] || lim[1] > lim[3]) return 1;
@@ -3276,9 +4080,9 @@ index d5767db1..f28e2f19 100644
 +        float f[18];
 +        if (arenas[i].size < 196u || address < arenas[i].begin ||
 +            address - arenas[i].begin > arenas[i].size - 196u) continue;
-+        if (psx_mod_read_word(source + 76u) != 0x48545542u) return 0;
++        if (pk_rd(source + 76u) != 0x48545542u) return 0;
 +        for (j = 0; j < 18u; ++j) {
-+            uint32_t bits = psx_mod_read_word(source + 108u + j * 4u);
++            uint32_t bits = pk_rd(source + 108u + j * 4u);
 +            memcpy(&f[j], &bits, sizeof f[j]);
 +            if (!isfinite(f[j]) || fabsf(f[j]) > 1.0e6f) return 0;
 +        }
@@ -3288,7 +4092,7 @@ index d5767db1..f28e2f19 100644
 +        memcpy(e, f + 6, 4 * sizeof(float));
 +        memcpy(uv, f + 10, 8 * sizeof(float));
 +        for (j = 0; j < 4u; ++j)
-+            col[j] = psx_mod_read_word(source + 180u + j * 4u) & 0xFFFFFFu;
++            col[j] = pk_rd(source + 180u + j * 4u) & 0xFFFFFFu;
 +        return 1;
 +    }
 +    return 0;
@@ -3303,18 +4107,32 @@ index d5767db1..f28e2f19 100644
              address - arenas[i].begin > arenas[i].size - 76u) continue;
 -        if (psx_mod_read_word(source + 36u) != 0x48545031u) return 0;
 +        {
-+            uint32_t magic = psx_mod_read_word(source + 36u);
++            uint32_t magic = pk_rd(source + 36u);
 +            if (magic < 0x48545031u || magic > 0x48545033u) return 0;
 +            s_last_depth_mode = (int)(magic - 0x48545031u);
 +        }
          for (j = 0; j < 9u; ++j) {
-             uint32_t bits = psx_mod_read_word(source + 40u + j * 4u);
+-            uint32_t bits = psx_mod_read_word(source + 40u + j * 4u);
++            uint32_t bits = pk_rd(source + 40u + j * 4u);
              float f;
+             memcpy(&f, &bits, sizeof f);
+             if (!isfinite(f)) return 0;
 diff --git a/runtime/src/psx_cycles.c b/runtime/src/psx_cycles.c
-index 4bfe7460..6e98a348 100644
+index 4bfe7460..9a99ceea 100644
 --- a/runtime/src/psx_cycles.c
 +++ b/runtime/src/psx_cycles.c
-@@ -195,10 +195,25 @@ uint32_t psx_idle_cycles_to_next_observable_event(void) {
+@@ -25,6 +25,10 @@ uint64_t psx_cycle_count = 0;
+ uint32_t g_psx_cyc_batch = 0;
+ uint32_t g_psx_cyc_batch_limit = 0;
+ int      g_psx_cyc_bb_defer = 0;
++/* Called before a machine state is written (boot_state.c), after the devices
++ * were serviced to the clock: brings what follows the clock from outside the
++ * device scheduler (the host's SPU pump) to the same point. */
++void (*g_psx_pre_snapshot_hook)(void) = 0;
+ uint32_t *g_psx_cyc_local_acc = NULL;
+ static int      s_cycle_replay_active = 0;
+ static uint64_t s_cycle_replay_live = 0;
+@@ -195,10 +199,25 @@ uint32_t psx_idle_cycles_to_next_observable_event(void) {
      return devices_cycles_to_next_idle_event();
  }
  
@@ -3341,7 +4159,7 @@ index 4bfe7460..6e98a348 100644
  }
  
  void psx_devices_service_to_now(void) {
-@@ -208,6 +223,13 @@ void psx_devices_service_to_now(void) {
+@@ -208,6 +227,13 @@ void psx_devices_service_to_now(void) {
      g_psx_cycle_fast_limit = 0;
      s_in_device_service = 1;
      uint64_t target = psx_cycle_count;
@@ -3355,6 +4173,395 @@ index 4bfe7460..6e98a348 100644
      if (s_devices_synced_cycle < target) {
          /* Rewind and re-play the gap in event-bounded chunks so device
           * callbacks see the same incremental psx_cycle_count they always did
+diff --git a/runtime/src/psx_modrb.c b/runtime/src/psx_modrb.c
+new file mode 100644
+index 00000000..2490444f
+--- /dev/null
++++ b/runtime/src/psx_modrb.c
+@@ -0,0 +1,213 @@
++/*
++ * Rollback for trusted plugins (a game's own online play).
++ *
++ * The plugin keeps its lockstep and its transport; this module gives it the
++ * machine side of a rollback: a snapshot of the machine a few instructions
++ * after every VBlank boundary (a "tick"), and on request the rewind to one of
++ * the last ticks and the replay of the boundaries after it, with no pacing,
++ * no host audio and no pad sampling of its own (the plugin's pad hook is
++ * called for every boundary, replayed ones included, and supplies each
++ * tick's pads again -- now with the inputs it had only guessed).
++ *
++ * Modelled on psx_selfcheck.c (same snapshot and restore recipe, same
++ * BB-edge save and present-edge load), but driven by the plugin instead of
++ * by a timer. Snapshots are the "lite" kind: no plugin packet memory, video
++ * memory left as it is (see g_mod_memory_snapshot_lite).
++ *
++ * Tick numbering: tick T is the T-th boundary since psx_modrb_enable(). The
++ * pad hook call that precedes boundary T supplies tick T's pads; snapshot T
++ * is taken right after boundary T, so it holds tick T's pads already latched.
++ * To correct the pads of tick M the plugin rewinds to tick M - 1.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include "boot_state.h"
++#include "cpu_state.h"
++#include "gpu.h"
++#include "interrupts.h"
++#include "overlay_loader.h"
++#include "psx_cycles.h"
++#include "psx_scheduler.h"
++#include "savestate.h"
++#include "spu.h"
++#include "psx_modrb.h"
++
++extern uint64_t s_frame_count;
++extern int g_mod_memory_snapshot_lite;
++extern uint32_t psx_last_irq_check_pc(void);
++extern uint32_t psx_compiled_irq_resume_pc(void);
++extern int psx_is_dispatchable(uint32_t pc);
++extern uint32_t psx_ram_live_bytes(void);
++
++#define RB_RING 16u
++
++typedef struct {
++    uint8_t* data;     /* kept between snapshots */
++    size_t   cap;
++    size_t   len;
++    uint32_t tick;
++    uint32_t csv;
++    uint64_t host_frame;
++    int      valid;
++} RbSnap;
++
++static RbSnap s_ring[RB_RING];
++static int s_on;
++static uint32_t s_tick;        /* boundaries completed */
++static int s_save_wait;        /* snapshot of s_tick still to take */
++static int s_load_wait;
++static uint32_t s_load_tick;
++static int s_resim;
++static uint32_t s_resim_end;   /* the tick the live run had reached */
++static CPUState* s_cpu;
++static void (*s_loaded_cb)(uint32_t tick);
++static PsxModRbStats s_stats;
++static uint32_t s_bios, s_entry;   /* the save states' integrity keys */
++
++static double now_ms(void) {
++    struct timespec ts;
++    timespec_get(&ts, TIME_UTC);
++    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
++}
++
++static int resume_pc_ok(uint32_t pc) {
++    uint32_t phys;
++    if (!psx_is_dispatchable(pc)) return 0;
++    if ((pc & 3u) != 0u) return 0;
++    if (pc == 0x80000080u || pc == 0xbfc00180u || pc == 0x80000000u) return 0;
++    if ((pc & 0xfff00000u) == 0xbfc00000u) return 1;
++    phys = pc & 0x1fffffffu;
++    return phys >= 0x1000u && phys < psx_ram_live_bytes();
++}
++
++static uint32_t pick_snap_pc(CPUState* cpu, uint32_t hint) {
++    const uint32_t cands[5] = { hint, psx_last_irq_check_pc(), psx_compiled_irq_resume_pc(),
++                                cpu ? cpu->gpr[31] : 0u, cpu ? cpu->pc : 0u };
++    for (int i = 0; i < 5; ++i)
++        if (resume_pc_ok(cands[i])) return cands[i];
++    return 0;
++}
++
++static void drop_all(void) {
++    for (uint32_t i = 0; i < RB_RING; ++i) {
++        free(s_ring[i].data);
++        memset(&s_ring[i], 0, sizeof s_ring[i]);
++    }
++}
++
++void psx_modrb_enable(void (*loaded)(uint32_t tick)) {
++    drop_all();
++    savestate_get_integrity(&s_bios, &s_entry);
++    s_on = 1;
++    s_tick = 0;
++    s_save_wait = s_load_wait = s_resim = 0;
++    s_loaded_cb = loaded;
++    memset(&s_stats, 0, sizeof s_stats);
++}
++
++void psx_modrb_disable(void) {
++    s_on = 0;
++    s_save_wait = s_load_wait = s_resim = 0;
++    drop_all();
++}
++
++int psx_modrb_enabled(void) { return s_on; }
++int psx_modrb_resimulating(void) { return s_on && (s_resim || s_load_wait); }
++uint32_t psx_modrb_tick(void) { return s_tick; }
++void psx_modrb_get_stats(PsxModRbStats* out) { if (out) *out = s_stats; }
++
++int psx_modrb_can_rewind(uint32_t tick) {
++    const RbSnap* s = &s_ring[tick % RB_RING];
++    return s_on && s->valid && s->tick == tick && tick <= s_tick;
++}
++
++/* The newest snapshot at or before `tick` (a boundary with no safe edge to
++ * snapshot at leaves a tick without one), 0 if none is held. */
++uint32_t psx_modrb_snapshot_at_or_before(uint32_t tick) {
++    if (!s_on) return 0;
++    for (uint32_t back = 0; back < RB_RING && back < tick; ++back)
++        if (psx_modrb_can_rewind(tick - back)) return tick - back;
++    return 0;
++}
++
++int psx_modrb_rewind(uint32_t tick) {
++    if (!psx_modrb_can_rewind(tick) || s_load_wait) return 0;
++    s_load_wait = 1;
++    s_load_tick = tick;
++    return 1;
++}
++
++/* Once per VBlank boundary, after the pads were sampled (main.cpp). */
++void psx_modrb_finish_frame(void) {
++    if (!s_on) return;
++    s_tick++;
++    if (s_resim) {
++        s_stats.resim_frames++;
++        if (s_tick >= s_resim_end) s_resim = 0;
++    }
++    s_save_wait = 1;
++}
++
++/* Safe BB-edge poll (beside savestate_poll): the deferred snapshot. */
++void psx_modrb_poll(CPUState* cpu, uint32_t resume_pc) {
++    if (!s_on || !s_save_wait || !cpu) return;
++    s_cpu = cpu;
++    if (s_load_wait) return;   /* about to rewind: this tick is taken again */
++    const uint32_t pc = pick_snap_pc(cpu, resume_pc);
++    if (!pc) return;           /* retry at the next edge */
++    RbSnap* s = &s_ring[s_tick % RB_RING];
++    CPUState snap = *cpu;
++    snap.pc = pc;
++    s->valid = 0;
++    const double t0 = now_ms();
++    g_mod_memory_snapshot_lite = 1;
++    const int ok = boot_state_save_buffer_reuse(&snap, s_bios, s_entry, &s->data, &s->cap, &s->len);
++    g_mod_memory_snapshot_lite = 0;
++    s_save_wait = 0;
++    if (!ok) { s_stats.save_failures++; return; }
++    s->tick = s_tick;
++    s->csv = interrupts_get_cycles_since_vblank();
++    s->host_frame = s_frame_count;
++    s->valid = 1;
++    s_stats.saves++;
++    s_stats.save_ms += now_ms() - t0;
++}
++
++/* After the present body (main.cpp, beside psx_selfcheck_flush_load): the
++ * requested rewind, at the same boundary point every time. Longjmps. */
++void psx_modrb_flush_load(void) {
++    if (!s_on || !s_load_wait || !s_cpu) return;
++    RbSnap* s = &s_ring[s_load_tick % RB_RING];
++    s_load_wait = 0;
++    if (!s->valid || s->tick != s_load_tick) { s_stats.load_failures++; return; }
++    const uint32_t live_tick = s_tick;
++    const double t0 = now_ms();
++    g_mod_memory_snapshot_lite = 1;
++    const int ok = boot_state_load_buffer(s->data, s->len, s_bios, s_entry, s_cpu);
++    g_mod_memory_snapshot_lite = 0;
++    if (!ok) { s_stats.load_failures++; return; }
++    psx_cycles_resync_after_restore(s_cpu);
++    interrupts_resync_after_restore();
++    interrupts_set_cycles_since_vblank(s->csv);
++    s_frame_count = s->host_frame;
++    overlay_loader_clear_lazy_miss();
++    spu_cd_audio_reset();
++    psx_frontend_on_rb_snap_loaded();
++    gpu_vblank_release_present_flush_guard();
++    gpu_vblank_clear_deferred_present();
++    /* the snapshots after this tick belong to the timeline being replaced */
++    for (uint32_t i = 0; i < RB_RING; ++i)
++        if (s_ring[i].valid && s_ring[i].tick > s_load_tick) s_ring[i].valid = 0;
++    s_tick = s_load_tick;
++    s_save_wait = 0;
++    s_resim = live_tick > s_load_tick;
++    s_resim_end = live_tick;
++    s_stats.loads++;
++    s_stats.load_ms += now_ms() - t0;
++    if (s_loaded_cb) s_loaded_cb(s_load_tick);
++    psx_scheduler_resume_at(s_cpu->pc);
++    /* unreachable */
++}
+diff --git a/runtime/src/psx_selfcheck.c b/runtime/src/psx_selfcheck.c
+index 0f0899be..ab481489 100644
+--- a/runtime/src/psx_selfcheck.c
++++ b/runtime/src/psx_selfcheck.c
+@@ -108,6 +108,41 @@ static ScBoundary s_r1[SC_SPAN_MAX];  /* replay #1 digests (rows unused) */
+ static ScRow      s_staged[SC_MAX_SLOTS]; /* sampler notes for this boundary */
+ static uint32_t   s_r1_gpr[SC_SPAN_MAX][32]; /* replay#1 GPRs for diverge dump */
+ static uint64_t   s_r1_cyc[SC_SPAN_MAX];
++/* DIAG (temporary): the live run's clock at each boundary, for the drift report */
++static uint64_t   s_live_cyc[SC_SPAN_MAX];
++static uint32_t   s_live_csv[SC_SPAN_MAX], s_live_istat[SC_SPAN_MAX];
++/* DIAG (temporary): the live RAM at boundaries 0..SC_RAMDIAG-1, to list what differs after a resim */
++#define SC_RAMDIAG 16
++extern uint8_t* memory_get_ram_ptr(void);
++static uint8_t   *s_live_ram[SC_RAMDIAG];
++static void sc_ram_keep(uint32_t idx) {
++    if (idx >= SC_RAMDIAG) return;
++    if (!s_live_ram[idx]) s_live_ram[idx] = (uint8_t*)malloc(memory_get_ram_bytes());
++    if (s_live_ram[idx]) memcpy(s_live_ram[idx], memory_get_ram_ptr(), memory_get_ram_bytes());
++}
++static void sc_ram_diff(uint32_t idx, const char *tag) {
++    if (idx >= SC_RAMDIAG || !s_live_ram[idx]) return;
++    const uint8_t *a = s_live_ram[idx], *b = memory_get_ram_ptr();
++    uint32_t n = memory_get_ram_bytes(), cnt = 0, lo = 0xFFFFFFFFu, hi = 0;
++    char buf[900]; size_t off = 0; buf[0] = 0;
++    for (uint32_t i = 0; i + 4u <= n; i += 4u) {
++        if (memcmp(a + i, b + i, 4) == 0) continue;
++        /* game-relevant only: the range and masks of the online play's checksum (EU) */
++        if (i < 0x10000u || i >= 0x193518u) continue;
++        if (i == 0x0AC89Cu || i == 0x0A9DB0u || (i >= 0x0DE140u && i < 0x0DE540u)) continue;
++        if ((i >= 0x0D9000u && i < 0x0DB000u) || i == 0x0A6ED8u || i == 0x0A6EDCu) continue;
++        if (i == 0x0A7F30u || i == 0x0A7F50u || i == 0x0A7F54u) continue;
++        if (cnt < 14u) {
++            uint32_t x, y; memcpy(&x, a + i, 4); memcpy(&y, b + i, 4);
++            int w = snprintf(buf + off, sizeof(buf) - off, " %06X:%08X/%08X", (unsigned)i, (unsigned)x, (unsigned)y);
++            if (w > 0) off += (size_t)w;
++        }
++        if (i < lo) lo = i;
++        if (i > hi) hi = i;
++        cnt++;
++    }
++    if (cnt) fprintf(stderr, "psxrecomp: selfcheck RAMDIFF %s idx=%u words=%u range=%06X..%06X:%s\n", tag, (unsigned)idx, (unsigned)cnt, (unsigned)lo, (unsigned)hi, buf);
++}
+ static uint32_t   s_r1_csv[SC_SPAN_MAX];
+ 
+ static int      s_pass;           /* 1..3 = replay #N (verdict = #2 vs #3) */
+@@ -403,6 +438,10 @@ int psx_selfcheck_resim_active(void)
+     /* RECORD must share the resim host-skip profile (no CD boost / audio pump /
+      * wall pacer). Otherwise the ambient left by the live record pass forks
+      * resim#1 from resim#2 while #2≡#3 (warm) stays bit-identical. */
++    {   /* a plugin's rollback replay shares the resim host-skip profile */
++        extern int psx_modrb_resimulating(void);
++        if (psx_modrb_resimulating()) return 1;
++    }
+     return s_phase == SC_RECORD || s_phase == SC_REPLAY ||
+            s_phase == SC_LOAD_WAIT;
+ }
+@@ -543,6 +582,10 @@ void psx_selfcheck_finish_frame(int defer_window)
+             memcpy(b->rows, s_staged, sizeof(b->rows));
+             sc_capture_digests(b);
+             s_rec_pc[idx] = sc_raw_pc();
++            s_live_cyc[idx] = psx_cycle_count;
++            sc_ram_keep(idx);
++            s_live_csv[idx] = interrupts_get_cycles_since_vblank();
++            { extern uint32_t i_stat; s_live_istat[idx] = i_stat; }
+         }
+         memset(s_staged, 0, sizeof(s_staged));
+         if (idx + 1u >= s_span) {
+@@ -616,6 +659,18 @@ void psx_selfcheck_finish_frame(int defer_window)
+             s_r1_pc[s_replay_idx] = sc_raw_pc();
+             if (sc_diff_parts(&s_rec[s_replay_idx], &cur, parts,
+                               sizeof(parts))) {
++                sc_ram_diff(s_replay_idx, "live-vs-resim1");
++                if (s_drift < 3) {
++                    extern uint32_t i_stat;
++                    fprintf(stderr, "psxrecomp: selfcheck DRIFT idx=%u parts=%s cyc live=%llu resim=%llu (d=%lld) csv=%u/%u istat=%x/%x clk=%08x/%08x ram=%08x/%08x pc=%08x/%08x\n",
++                            (unsigned)s_replay_idx, parts, (unsigned long long)s_live_cyc[s_replay_idx],
++                            (unsigned long long)psx_cycle_count, (long long)psx_cycle_count - (long long)s_live_cyc[s_replay_idx],
++                            (unsigned)s_live_csv[s_replay_idx], (unsigned)interrupts_get_cycles_since_vblank(),
++                            (unsigned)s_live_istat[s_replay_idx], (unsigned)i_stat,
++                            (unsigned)s_rec[s_replay_idx].core.clock_irq, (unsigned)cur.core.clock_irq,
++                            (unsigned)s_rec[s_replay_idx].core.ram, (unsigned)cur.core.ram,
++                            (unsigned)s_rec_pc[s_replay_idx], (unsigned)sc_raw_pc());
++                }
+                 if (s_drift == 0) {
+                     s_drift_first_idx = s_replay_idx;
+                     snprintf(s_drift_parts, sizeof(s_drift_parts), "%s",
+@@ -950,6 +1005,10 @@ static uint32_t sc_pick_snap_pc(struct CPUState *cpu, uint32_t hint)
+ 
+ void psx_selfcheck_poll(struct CPUState *cpu, uint32_t resume_pc)
+ {
++    {   /* the plugins' rollback snapshots ride on the same BB-edge polls */
++        extern void psx_modrb_poll(struct CPUState *cpu, uint32_t resume_pc);
++        psx_modrb_poll(cpu, resume_pc);
++    }
+     if (s_phase != SC_SAVE_WAIT && s_phase != SC_LOAD_WAIT)
+         return;
+     if (!cpu || psx_netplay_active())
+diff --git a/runtime/src/savestate.c b/runtime/src/savestate.c
+index c9b42d53..8d846b6d 100644
+--- a/runtime/src/savestate.c
++++ b/runtime/src/savestate.c
+@@ -764,7 +764,46 @@ uint32_t savestate_last_save_pc(void) {
+     return s_last_save_pc;
+ }
+ 
++/* TEST (PSX_SNAP_BENCH=1): once per request (a plugin sets g_snap_bench_req
++ * each frame) time an in-memory save, and a load of that same state. */
++int g_snap_bench_req = 0;
++static void snap_bench(CPUState* cpu, uint32_t resume_pc) {
++    static int on = -1, do_load = 0;
++    static double t_save, t_load;
++    static unsigned n, nl;
++    static size_t last_len;
++    if (on < 0) { const char* e = getenv("PSX_SNAP_BENCH"); on = e && e[0] != '0'; do_load = e && e[0] == '2'; }
++    if (!on) { g_snap_bench_req = 0; return; }
++    uint32_t pc = savestate_resolve_resume_pc(cpu, resume_pc);
++    int pc_matches_cpu = cpu && cpu->pc != 0u && (((cpu->pc ^ pc) & 0x1FFFFFFFu) == 0u);
++    if ((resume_pc == 0u && !pc_matches_cpu) || !psx_irq_resume_context_snapshot_safe_at(pc) || !savestate_resume_pc_ok(pc)) return;
++    g_snap_bench_req = 0;
++    uint8_t* buf = NULL; size_t len = 0;
++    CPUState snap = *cpu;
++    snap.pc = pc;
++    extern int g_mod_memory_snapshot_lite;
++    g_mod_memory_snapshot_lite = 1;
++    double t0 = savestate_mono_ms();
++    int ok = boot_state_save_buffer_raw(&snap, s_bios_checksum, s_entry_pc, &buf, &len);
++    double t1 = savestate_mono_ms();
++    if (ok) { t_save += t1 - t0; n++; last_len = len; }
++    if (ok && do_load) {
++        CPUState tmp = *cpu;
++        double t2 = savestate_mono_ms();
++        int lok = boot_state_load_buffer(buf, len, s_bios_checksum, s_entry_pc, &tmp);
++        double t3 = savestate_mono_ms();
++        if (lok) { t_load += t3 - t2; nl++; }
++    }
++    free(buf);
++    g_mod_memory_snapshot_lite = 0;
++    if (n && n % 200u == 0u) {
++        printf("SNAP BENCH: %u saves avg %.3f ms (%zu bytes), %u loads avg %.3f ms\n", n, t_save / n, last_len, nl, nl ? t_load / nl : 0.0);
++        fflush(stdout);
++    }
++}
++
+ void savestate_poll(CPUState* cpu, uint32_t resume_pc) {
++    if (g_snap_bench_req) snap_bench(cpu, resume_pc);
+     if (s_save_pending < 0 && s_load_pending < 0) return;   /* hot path: nothing staged */
+ 
+     if (s_save_pending >= 0) {
+diff --git a/runtime/src/sio.c b/runtime/src/sio.c
+index ad61a306..ac449d58 100644
+--- a/runtime/src/sio.c
++++ b/runtime/src/sio.c
+@@ -500,8 +500,14 @@ extern uint8_t psx_read_byte(uint32_t addr);
+  * No device-specific paths. Macro is in sio.h; defaults to 1. */
+ volatile int g_sio_timing_active = 0;
+ #if SIO_MODEL_CYCLE_PACED
+-#define SIO_BAUD_CYCLES_DEFAULT 1088
+-#define SIO_ACK_CYCLES_DEFAULT  170
++/* Byte shift and ACK delay, in cycles (the console: 1088 and 170). A game may
++ * opt in to shorter ones (trusted plugin): its pad routine polls JOY_STAT
++ * while a byte is on the wire -- thousands of register reads a frame, each a
++ * device service -- and a PC has no wire. */
++uint32_t g_sio_baud_cycles = 1088u;
++uint32_t g_sio_ack_cycles  = 170u;
++#define SIO_BAUD_CYCLES_DEFAULT ((int)g_sio_baud_cycles)
++#define SIO_ACK_CYCLES_DEFAULT  ((int)g_sio_ack_cycles)
+ static int sio_tick_quantum_cycles = 64;
+ static int     sio_shift_active     = 0;
+ static uint8_t sio_shift_byte       = 0;
 diff --git a/runtime/tests/test_mod_runtime.cpp b/runtime/tests/test_mod_runtime.cpp
 index 49791598..431a6f50 100644
 --- a/runtime/tests/test_mod_runtime.cpp

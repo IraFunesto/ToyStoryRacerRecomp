@@ -134,6 +134,11 @@ static int      s_enabled;
 static uint32_t s_arena[2];
 static uint8_t *s_arena_host[2];
 static uint32_t s_arena_used[2];
+/* rollback snapshots keep the arenas' used part (the restored ordering
+ * tables point into it) */
+static void arena_live(int buf) {
+    if (s_arena[buf]) psx_mod_gpu_dma_set_live(s_arena[buf], ARENA_BYTES, s_arena_used[buf]);
+}
 static int      s_last_buf = -1;
 static uint32_t s_debug_mode_addr;
 static uint32_t s_frame, s_views[4];
@@ -158,9 +163,26 @@ static int s_force_glow;      /* emit_face: draw the next face from this glow ba
  * OT slot: like the game's, they brighten whatever the painter order puts
  * under them (the boxes around a lamp catch its glare). */
 
-static inline uint32_t rd32(uint32_t a) { return psx_mod_read_word(a); }
-static inline uint16_t rd16(uint32_t a) { return psx_mod_read_half(a); }
-static inline uint8_t  rd8(uint32_t a)  { return psx_mod_read_byte(a); }
+/* The game's memory, read straight from the console RAM (this trusted plugin
+ * is linked into the runtime): the models, lists and tables are read every
+ * frame, thousands of times. Anything outside the RAM (mod memory, the
+ * scratchpad) goes through the runtime as before. */
+extern uint8_t *g_psx_ram;
+extern uint32_t g_psx_ram_mask;
+#define RAM_OFF(a) (((a) & 0x1FFFFFFFu) & g_psx_ram_mask)
+#define RAM_DIRECT(a, n) (((a) & 0x1F800000u) == 0u && g_psx_ram && RAM_OFF(a) <= g_psx_ram_mask - ((n) - 1u))
+static inline uint32_t rd32(uint32_t a) {
+    if (RAM_DIRECT(a, 4u)) { uint32_t v; memcpy(&v, g_psx_ram + RAM_OFF(a), 4); return v; }
+    return psx_mod_read_word(a);
+}
+static inline uint16_t rd16(uint32_t a) {
+    if (RAM_DIRECT(a, 2u)) { uint16_t v; memcpy(&v, g_psx_ram + RAM_OFF(a), 2); return v; }
+    return psx_mod_read_half(a);
+}
+static inline uint8_t rd8(uint32_t a) {
+    if (RAM_DIRECT(a, 1u)) return g_psx_ram[RAM_OFF(a)];
+    return psx_mod_read_byte(a);
+}
 
 /* ---- level parse ---------------------------------------------------------- */
 
@@ -1954,6 +1976,7 @@ static int frame_buffer_begin(void) {
         s_last_buf = buf;
         s_frame++;
         s_arena_used[buf] = 0;
+        arena_live(buf);
         s_nviews = 0;
     } else if (cur < s_last_prim_cursor) {
         /* the same buffer built again from its start (the game threw the
@@ -2131,6 +2154,7 @@ static void model_draw_impl(struct CPUState *cpu, uint32_t address) {
     s_cull_flip = 0;
     s_ztab_half = 0;
     s_arena_used[buf] += c.out_used;
+    arena_live(buf);
     s_model_calls++;
     s_model_tris += c.out_used / PACKET_BYTES;
     if ((s_model_calls % 2000u) == 1u) {
@@ -2339,6 +2363,7 @@ static void section_draw_impl(struct CPUState *cpu, uint32_t address) {
     s_emit_us += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000LL + (t1.tv_nsec - t0.tv_nsec) / 1000);
     s_emit_n++;
     s_arena_used[buf] += c.out_used;
+    arena_live(buf);
     if ((++s_stat_frames % 400u) == 1u) {
         fprintf(stdout, "tsr native scene: frame %u ot %08X pass %u list %08X: %u sections, %u drawn natively, %u left -> %u tris, arena %u KB (area mode %d, cur %d)\n",
                 frame, ot, pass, list, count, drawn, kept, c.out_used / PACKET_BYTES, s_arena_used[buf] / 1024u, by_area, cur_area);
@@ -2457,6 +2482,7 @@ static int billboard_begin(Ctx *c, struct CPUState *cpu, float M[9], float *zsf4
 static void billboard_end(Ctx *c, int buf) {
     s_ztab_half = 0;
     s_arena_used[buf] += c->out_used;
+    arena_live(buf);
 }
 
 /* The clip rectangle 0x800A9F06 (left) / 0x800A9F0C (right) / 0x800A9F08
@@ -3377,6 +3403,16 @@ void tsr_native_scene_section_draw(struct CPUState *cpu, uint32_t address) {
     double t0 = now_us();
     section_draw_impl(cpu, address);
     s_us_scene += now_us() - t0;
+}
+
+/* After a rollback (tsr_online.c): the restored game builds its frame again;
+ * the renderer's own frame bookkeeping starts over with it. */
+void tsr_native_scene_on_rollback(void) {
+    /* the arenas as far as the restored frame had filled them (its ordering
+     * table may already point at packets from before the snapshot) */
+    for (int i = 0; i < 2; ++i)
+        if (s_arena[i]) s_arena_used[i] = psx_mod_gpu_dma_get_live(s_arena[i]);
+    s_last_buf = rd32(BUFFER_VAR) == BUFFER0 ? 0 : 1;
 }
 
 /* debug block byte (0 when the block is not allocated) */
