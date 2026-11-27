@@ -277,162 +277,22 @@ diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
 index ff75e9c3..8567c578 100644
 --- a/runtime/include/iso_reader.h
 +++ b/runtime/include/iso_reader.h
-@@ -1,12 +1,12 @@
- #pragma once
+@@ -23,6 +23,7 @@
+ namespace PS1 {
  
--#include <cstdint>
--#include <array>
--#include <string>
--#include <fstream>
--#include <memory>
--#include <unordered_map>
--#include <vector>
-+#include <cstdint>
-+#include <array>
-+#include <string>
-+#include <fstream>
-+#include <memory>
-+#include <unordered_map>
-+#include <vector>
- 
- /**
-  * ISO/BIN/CUE Reader for PS1 CD-ROM images
-@@ -20,10 +20,11 @@
-  * - Read file contents by path
-  */
- 
--namespace PS1 {
--
--struct CHDState;
--
-+namespace PS1 {
-+
-+struct CHDState;
+ struct CHDState;
 +struct FolderDiscState;
-+
+ 
  /**
   * Information about a file entry in the ISO filesystem
-  */
-@@ -44,21 +45,21 @@ struct RootDirectoryInfo {
- 
- /**
-  * A CD track parsed from the .cue sheet (or the synthesized single data
-- * track for a bare .bin/.iso). Multi-track discs can carry a
-+ * track for a bare .bin/.iso). Multi-track discs can carry a
-  * Red Book CD-DA audio track after the data track; the CD model's TOC
-  * commands (GetTN/GetTD) must report them.
-  */
--struct CDTrack {
-+struct CDTrack {
-     int      number;     // 1-based track number
-     bool     is_audio;   // true = CD-DA audio (Red Book); false = data
--    uint32_t start_lba;  // disc-relative start LBA (cue INDEX 01; track 1 = 0).
-+    uint32_t start_lba;  // disc-relative start LBA (cue INDEX 01; track 1 = 0).
-                          // Single-FILE cues: equals the .bin-relative INDEX time.
-                          // Multi-FILE cues (redump "(Track N).bin" dumps): the
--                         // owning file's first disc sector plus its INDEX time.
--                         // Either way, plus every cue PREGAP/POSTGAP before it
--                         // (gaps the dump does not store).
--    uint32_t pregap_lba; // disc-relative start of the track's pregap: its cue
--                         // PREGAP if any, else INDEX 00, else INDEX 01
-+                         // owning file's first disc sector plus its INDEX time.
-+                         // Either way, plus every cue PREGAP/POSTGAP before it
-+                         // (gaps the dump does not store).
-+    uint32_t pregap_lba; // disc-relative start of the track's pregap: its cue
-+                         // PREGAP if any, else INDEX 00, else INDEX 01
- };
- 
- /**
-@@ -70,23 +71,24 @@ struct CDTrack {
- struct BinSegment {
-     std::string   path;          // resolved on-disk path
-     std::ifstream file;          // opened for the reader's lifetime
--    uint32_t      start_lba;     // disc sector of this file's first stored sector
-+    uint32_t      start_lba;     // disc sector of this file's first stored sector
+@@ -73,6 +74,7 @@ struct BinSegment {
+     uint32_t      start_lba;     // disc sector of this file's first stored sector
      uint32_t      sector_count;  // sectors stored in this file
      bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
--};
--
--/**
-- * A contiguous run of disc sectors. A stored span maps onto sectors of one
-- * BinSegment; a virtual span is a cue PREGAP/POSTGAP that the dump does not
-- * store and that reads back as zero (silence), as the CHD path already does.
-- * Without PREGAP/POSTGAP lines each file is exactly one stored span, so the
-- * disc layout is the plain concatenation of the files.
-- */
--struct BinSpan {
--    uint32_t disc_start;    // first disc-relative sector
--    uint32_t sector_count;
--    int      segment;       // index into segments_, or -1 for a virtual gap
--    uint32_t file_sector;   // first sector within the segment's file
 +    std::vector<uint8_t> data;   // whole file in memory (empty = read from file)
-+};
-+
-+/**
-+ * A contiguous run of disc sectors. A stored span maps onto sectors of one
-+ * BinSegment; a virtual span is a cue PREGAP/POSTGAP that the dump does not
-+ * store and that reads back as zero (silence), as the CHD path already does.
-+ * Without PREGAP/POSTGAP lines each file is exactly one stored span, so the
-+ * disc layout is the plain concatenation of the files.
-+ */
-+struct BinSpan {
-+    uint32_t disc_start;    // first disc-relative sector
-+    uint32_t sector_count;
-+    int      segment;       // index into segments_, or -1 for a virtual gap
-+    uint32_t file_sector;   // first sector within the segment's file
  };
  
- class ISOReader {
-@@ -103,7 +105,7 @@ public:
- 
-     /**
-      * Open an ISO/BIN file for reading
--     * @param filename Path to .iso, .bin, .img, .car, .cue, or .chd file
-+     * @param filename Path to .iso, .bin, .img, .car, .cue, or .chd file
-      * @return true if opened successfully, false otherwise
-      */
-     bool Open(const std::string& filename);
-@@ -127,15 +129,15 @@ public:
-      * @param buffer Buffer to read into (must be at least 2352 bytes)
-      * @return true if the image stores raw sectors and read succeeded
-      */
--    bool ReadRawSector(uint32_t lba, uint8_t* buffer);
--
--    /**
--     * Read generated or SBI-replacement subchannel Q for a disc LBA.
--     * SBI records intentionally carry invalid CRC data; valid is false for
--     * those sectors so the CD controller can retain its last valid Q packet.
--     */
--    bool ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) const;
--    bool HasSubChannelReplacements() const { return !subq_replacements_.empty(); }
-+    bool ReadRawSector(uint32_t lba, uint8_t* buffer);
-+
-+    /**
-+     * Read generated or SBI-replacement subchannel Q for a disc LBA.
-+     * SBI records intentionally carry invalid CRC data; valid is false for
-+     * those sectors so the CD controller can retain its last valid Q packet.
-+     */
-+    bool ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) const;
-+    bool HasSubChannelReplacements() const { return !subq_replacements_.empty(); }
- 
-     /**
-      * Check if a file is currently open
-@@ -163,11 +165,11 @@ public:
-     /**
-      * CD-track TOC accessors (multi-track .cue support).
-      * TrackCount() is >= 1 (a bare image synthesizes one data track).
--     * TrackStartLBA(n)/TrackPregapLBA(n)/TrackIsAudio(n) take a 1-based track number.
-+     * TrackStartLBA(n)/TrackPregapLBA(n)/TrackIsAudio(n) take a 1-based track number.
-      */
--    int      TrackCount() const;
--    uint32_t TrackStartLBA(int track) const;
--    uint32_t TrackPregapLBA(int track) const;
-+    int      TrackCount() const;
-+    uint32_t TrackStartLBA(int track) const;
-+    uint32_t TrackPregapLBA(int track) const;
-     bool     TrackIsAudio(int track) const;
- 
-     /**
+ /**
 @@ -190,6 +192,8 @@ public:
       * @return true if found, false if not found
       */
@@ -472,43 +332,14 @@ index ff75e9c3..8567c578 100644
      /**
       * Parse the Primary Volume Descriptor (sector 16)
       * Extracts volume ID and root directory information
-@@ -237,23 +263,24 @@ private:
-     std::vector<ISOFileEntry> ListFilesByLBA(uint32_t lba, uint32_t dir_size);
- 
-     /**
--     * Helper: find the span containing a disc-relative LBA.
--     * @return span pointer, or nullptr when lba is past the disc end
-+     * Helper: find the span containing a disc-relative LBA.
-+     * @return span pointer, or nullptr when lba is past the disc end
-      */
--    const BinSpan* SpanForLBA(uint32_t lba) const;
--
--    bool LoadSBICompanion(const std::string& image_path);
-+    const BinSpan* SpanForLBA(uint32_t lba) const;
-+
-+    bool LoadSBICompanion(const std::string& image_path);
- 
-     bool is_open_;
-     std::string volume_id_;
-     std::string bin_path_;          // first (data) segment; kept for callers
-     RootDirectoryInfo root_dir_;
--    std::vector<CDTrack> tracks_;   // from the .cue TOC; >=1 entry after Open()
--    std::vector<BinSegment> segments_;  // cue FILE entries in disc order; >=1 after Open()
--    std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
--    uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
--    std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
--    std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
--};
-+    std::vector<CDTrack> tracks_;   // from the .cue TOC; >=1 entry after Open()
-+    std::vector<BinSegment> segments_;  // cue FILE entries in disc order; >=1 after Open()
-+    std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
-+    uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
-+    std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
+@@ -253,6 +279,7 @@ private:
+     std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
+     uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
+     std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
 +    std::unique_ptr<FolderDiscState> folder_; // present only for an extracted folder
-+    std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
-+};
+     std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
+ };
  
- } // namespace PS1
 diff --git a/runtime/include/mod_memory.h b/runtime/include/mod_memory.h
 index 93c8de19..bc9de540 100644
 --- a/runtime/include/mod_memory.h
@@ -2663,7 +2494,7 @@ diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
 index af866320..084d8732 100644
 --- a/runtime/src/iso_reader.cpp
 +++ b/runtime/src/iso_reader.cpp
-@@ -5,21 +5,23 @@
+@@ -5,7 +5,9 @@
  #include <filesystem>
  #include <algorithm>
  #include <cstring>
@@ -2671,36 +2502,9 @@ index af866320..084d8732 100644
  #include <cstdio>
 +#include <iterator>
  #include <limits>
--
--namespace PS1 {
--
--// PS1 CD-ROM sector size (Mode 2, Form 1 user data)
--constexpr size_t SECTOR_SIZE = 2048;
--
--// Full sector size including headers/subchannel (2352 bytes for raw BIN files)
--constexpr size_t RAW_SECTOR_SIZE = 2352;
--
--// Offset to user data in raw sector (Mode 2, Form 1)
--constexpr size_t RAW_DATA_OFFSET = 24;
--
--// Primary Volume Descriptor location
-+
-+namespace PS1 {
-+
-+// PS1 CD-ROM sector size (Mode 2, Form 1 user data)
-+constexpr size_t SECTOR_SIZE = 2048;
-+
-+// Full sector size including headers/subchannel (2352 bytes for raw BIN files)
-+constexpr size_t RAW_SECTOR_SIZE = 2352;
-+
-+// Offset to user data in raw sector (Mode 2, Form 1)
-+constexpr size_t RAW_DATA_OFFSET = 24;
-+
-+// Primary Volume Descriptor location
- constexpr uint32_t PVD_SECTOR = 16;
  
- constexpr uint32_t CD_FRAMES_PER_SECOND = 75;
-@@ -142,25 +144,349 @@ static bool read_chd_raw(CHDState& chd, uint32_t lba, uint8_t* buffer,
+ namespace PS1 {
+@@ -142,6 +144,324 @@ static bool read_chd_raw(CHDState& chd, uint32_t lba, uint8_t* buffer,
      return true;
  }
  
@@ -3023,34 +2827,9 @@ index af866320..084d8732 100644
 +}
 +
  ISOReader::ISOReader()
--    : is_open_(false) {
--    root_dir_.lba = 0;
--    root_dir_.size = 0;
--}
--
--ISOReader::~ISOReader() {
--    Close();
--}
--
-+    : is_open_(false) {
-+    root_dir_.lba = 0;
-+    root_dir_.size = 0;
-+}
-+
-+ISOReader::~ISOReader() {
-+    Close();
-+}
-+
- bool ISOReader::Open(const std::string& filename) {
--    // Close any previously opened image (also resets tracks/segments)
--    Close();
--
--    // Check if file exists
-+    // Close any previously opened image (also resets tracks/segments)
-+    Close();
-+
-+    // Check if file exists
-     if (!std::filesystem::exists(filename)) {
+     : is_open_(false) {
+     root_dir_.lba = 0;
+@@ -161,6 +481,12 @@ bool ISOReader::Open(const std::string& filename) {
          return false;
      }
  
@@ -3063,132 +2842,10 @@ index af866320..084d8732 100644
      if (PSXRecompV4::path_has_extension_ci(
              std::filesystem::path(filename), ".chd")) {
          auto state = std::make_unique<CHDState>();
-@@ -270,69 +596,82 @@ bool ISOReader::Open(const std::string& filename) {
-         return true;
-     }
- 
--    // Ordered list of BINARY files backing the disc. A bare .bin/.iso is a
--    // single-entry list; a .cue contributes one entry per FILE line (redump
--    // multi-track dumps ship one file per track).
--    std::vector<std::string> bin_files;
--
--    // Tracks parsed from the cue. INDEX times in a cue are relative to the
--    // OWNING FILE, so remember which file each track belongs to and convert
--    // to disc-relative LBAs once the segment table (with each file's first
--    // disc sector) is built below.
--    using PendingTrack = PSXRecompV4::CueTrackRef;
--    std::vector<PendingTrack> pending_tracks;
--
--    if (PSXRecompV4::path_has_extension_ci(std::filesystem::path(filename), ".cue")) {
--        // Parse the .cue via the shared parser: resolve every FILE, AND build
--        // the track TOC from the TRACK/INDEX lines. Single-file cues keep
--        // their historical behavior; multi-file cues (data track + CD-DA audio
--        // tracks in separate .bin files) map each file to a contiguous run of
--        // disc sectors, concatenated in cue order.
--        const PSXRecompV4::CueSheet sheet =
--            PSXRecompV4::parse_cue_sheet(std::filesystem::path(filename));
--
--        // A cue we cannot read, one that names no FILE, or one whose payload is
--        // not raw BINARY (WAVE/MP3 have no fixed sector geometry — mis-mapping
--        // the TOC would be worse than refusing the image) has nothing to mount.
--        if (!sheet.opened || sheet.files.empty() || sheet.has_non_binary_file()) {
--            return false;
--        }
--
--        bin_files.reserve(sheet.files.size());
--        for (const PSXRecompV4::CueFileRef& f : sheet.files) {
--            bin_files.push_back(f.path.string());
--        }
--        pending_tracks = sheet.tracks;
--    } else {
--        bin_files.push_back(filename);
--    }
--
--    // Build the segment table: open every file and lay it out at the next
--    // disc-relative sector. Every file must open — a multi-file dump with a
--    // missing track file would otherwise silently read the wrong sectors.
--    for (const std::string& bin_name : bin_files) {
--        BinSegment seg;
--        seg.path = bin_name;
--        seg.file.open(bin_name, std::ios::binary);
--        if (!seg.file.is_open()) {
--            Close();
--            return false;
--        }
--        seg.file.seekg(0, std::ios::end);
--        const std::streampos file_size = seg.file.tellg();
--        seg.file.clear();
--        if (file_size <= 0) {
--            Close();
--            return false;
--        }
--        const uint64_t size = static_cast<uint64_t>(file_size);
--        seg.raw          = (size % RAW_SECTOR_SIZE) == 0;
--        seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
--                                                                 : SECTOR_SIZE));
-+    // Ordered list of BINARY files backing the disc. A bare .bin/.iso is a
-+    // single-entry list; a .cue contributes one entry per FILE line (redump
-+    // multi-track dumps ship one file per track).
-+    std::vector<std::string> bin_files;
-+
-+    // Tracks parsed from the cue. INDEX times in a cue are relative to the
-+    // OWNING FILE, so remember which file each track belongs to and convert
-+    // to disc-relative LBAs once the segment table (with each file's first
-+    // disc sector) is built below.
-+    using PendingTrack = PSXRecompV4::CueTrackRef;
-+    std::vector<PendingTrack> pending_tracks;
-+
-+    if (PSXRecompV4::path_has_extension_ci(std::filesystem::path(filename), ".cue")) {
-+        // Parse the .cue via the shared parser: resolve every FILE, AND build
-+        // the track TOC from the TRACK/INDEX lines. Single-file cues keep
-+        // their historical behavior; multi-file cues (data track + CD-DA audio
-+        // tracks in separate .bin files) map each file to a contiguous run of
-+        // disc sectors, concatenated in cue order.
-+        const PSXRecompV4::CueSheet sheet =
-+            PSXRecompV4::parse_cue_sheet(std::filesystem::path(filename));
-+
-+        // A cue we cannot read, one that names no FILE, or one whose payload is
-+        // not raw BINARY (WAVE/MP3 have no fixed sector geometry — mis-mapping
-+        // the TOC would be worse than refusing the image) has nothing to mount.
-+        if (!sheet.opened || sheet.files.empty() || sheet.has_non_binary_file()) {
-+            return false;
-+        }
-+
-+        bin_files.reserve(sheet.files.size());
-+        for (const PSXRecompV4::CueFileRef& f : sheet.files) {
-+            bin_files.push_back(f.path.string());
-+        }
-+        pending_tracks = sheet.tracks;
-+    } else {
-+        bin_files.push_back(filename);
-+    }
-+
-+    // Build the segment table: open every file and lay it out at the next
-+    // disc-relative sector. Every file must open — a multi-file dump with a
-+    // missing track file would otherwise silently read the wrong sectors.
-+    for (const std::string& bin_name : bin_files) {
-+        BinSegment seg;
-+        seg.path = bin_name;
-+        seg.file.open(bin_name, std::ios::binary);
-+        if (!seg.file.is_open()) {
-+            Close();
-+            return false;
-+        }
-+        seg.file.seekg(0, std::ios::end);
-+        const std::streampos file_size = seg.file.tellg();
-+        seg.file.clear();
-+        if (file_size <= 0) {
-+            Close();
-+            return false;
-+        }
-+        const uint64_t size = static_cast<uint64_t>(file_size);
-+        seg.raw          = (size % RAW_SECTOR_SIZE) == 0;
-+        seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
-+                                                                 : SECTOR_SIZE));
+@@ -330,6 +656,19 @@ bool ISOReader::Open(const std::string& filename) {
+         seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
+                                                                  : SECTOR_SIZE));
          seg.start_lba    = 0;  // assigned by the layout pass below
--        segments_.push_back(std::move(seg));
--    }
--
 +        /* Keep the dump in memory (up to 1 GB): a sector read from the file
 +         * can block the emulation thread for tens of milliseconds when the
 +         * OS has not cached that part of the image yet (a visible hitch when
@@ -3202,136 +2859,18 @@ index af866320..084d8732 100644
 +            if (seg.file.gcount() != static_cast<std::streamsize>(size)) seg.data.clear();
 +            seg.file.clear();
 +        }
-+        segments_.push_back(std::move(seg));
-+    }
-+
-     // Lay the files out on the disc and convert the pending cue tracks to
-     // disc-relative LBAs. INDEX times are file-relative; a cue PREGAP (before
-     // a track's INDEX 00/01) or POSTGAP (after its data) is a run of sectors
-@@ -392,29 +731,29 @@ bool ISOReader::Open(const std::string& filename) {
-             }
-         }
-         push_stored(si, cursor, n);
--    }
-+    }
-     disc_sector_count_ = disc;
--
--    // Synthesize a single data track for a bare .bin/.iso or a .cue with no
--    // parseable TRACK entries, so TrackCount() is always >= 1.
--    if (tracks_.empty()) {
--        CDTrack t;
--        t.number = 1; t.is_audio = false; t.start_lba = 0; t.pregap_lba = 0;
--        tracks_.push_back(t);
--    }
--
--    // Store the resolved data-track path for callers
--    bin_path_ = segments_.front().path;
--
--    is_open_ = true;
--
--    // Parse the volume descriptor to extract filesystem metadata when
--    // present. Runtime CD-ROM access only needs sector reads, so keep the
--    // image mounted even if an ISO9660 header is missing or nonstandard.
-+
-+    // Synthesize a single data track for a bare .bin/.iso or a .cue with no
-+    // parseable TRACK entries, so TrackCount() is always >= 1.
-+    if (tracks_.empty()) {
-+        CDTrack t;
-+        t.number = 1; t.is_audio = false; t.start_lba = 0; t.pregap_lba = 0;
-+        tracks_.push_back(t);
-+    }
-+
-+    // Store the resolved data-track path for callers
-+    bin_path_ = segments_.front().path;
-+
-+    is_open_ = true;
-+
-+    // Parse the volume descriptor to extract filesystem metadata when
-+    // present. Runtime CD-ROM access only needs sector reads, so keep the
-+    // image mounted even if an ISO9660 header is missing or nonstandard.
-     if (!ParseVolumeDescriptor()) {
--        volume_id_.clear();
--        root_dir_.lba = 0;
--        root_dir_.size = 0;
-+        volume_id_.clear();
-+        root_dir_.lba = 0;
-+        root_dir_.size = 0;
+         segments_.push_back(std::move(seg));
      }
  
-     if (!LoadSBICompanion(filename)) {
-@@ -424,24 +763,25 @@ bool ISOReader::Open(const std::string& filename) {
+@@ -427,6 +766,7 @@ bool ISOReader::Open(const std::string& filename) {
  
-     return true;
- }
--
-+
  void ISOReader::Close() {
      chd_.reset();
--    for (BinSegment& seg : segments_) {
--        if (seg.file.is_open()) {
--            seg.file.close();
--        }
--    }
--    segments_.clear();
 +    folder_.reset();
-+    for (BinSegment& seg : segments_) {
-+        if (seg.file.is_open()) {
-+            seg.file.close();
-+        }
-+    }
-+    segments_.clear();
-     spans_.clear();
-     disc_sector_count_ = 0;
-     tracks_.clear();
-     subq_replacements_.clear();
--    bin_path_.clear();
--    volume_id_.clear();
--    root_dir_.lba = 0;
--    root_dir_.size = 0;
--    is_open_ = false;
-+    bin_path_.clear();
-+    volume_id_.clear();
-+    root_dir_.lba = 0;
-+    root_dir_.size = 0;
-+    is_open_ = false;
- }
- 
- bool ISOReader::LoadSBICompanion(const std::string& image_path) {
-@@ -516,23 +856,23 @@ bool ISOReader::ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) cons
-     *valid = true;
-     return true;
- }
--
-+
- const BinSpan* ISOReader::SpanForLBA(uint32_t lba) const {
-     // Linear scan: images carry a handful of spans (one per track file, plus
-     // one per cue gap).
-     for (const BinSpan& span : spans_) {
-         if (lba >= span.disc_start && lba - span.disc_start < span.sector_count) {
-             return &span;
--        }
--    }
--    return nullptr;
--}
--
-+        }
-+    }
-+    return nullptr;
-+}
-+
- bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
--    if (!is_open_ || !buffer) {
--        return false;
--    }
--
-+    if (!is_open_ || !buffer) {
-+        return false;
-+    }
-+
-     if (chd_) {
-         uint8_t raw[RAW_SECTOR_SIZE];
-         CHDTrackMode mode;
-@@ -544,10 +884,17 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+     for (BinSegment& seg : segments_) {
+         if (seg.file.is_open()) {
+             seg.file.close();
+@@ -544,6 +884,13 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
          return true;
      }
  
@@ -3344,56 +2883,11 @@ index af866320..084d8732 100644
 +
      const BinSpan* span = SpanForLBA(lba);
      if (!span) {
--        return false;
--    }
-+        return false;
-+    }
-     if (span->segment < 0) {
-         // Cue PREGAP/POSTGAP: not stored in the dump; reads back as zero.
-         std::memset(buffer, 0, SECTOR_SIZE);
-@@ -555,55 +902,65 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
-     }
+         return false;
+@@ -556,6 +903,15 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
      BinSegment* seg = &segments_[(size_t)span->segment];
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
--
--    // Clear any error flags from a previous failed read
--    seg->file.clear();
--
--    if (seg->raw) {
--        // Raw BIN format - read full sector, extract user data
--        std::streampos offset =
--            static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET;
--        seg->file.seekg(offset, std::ios::beg);
--
--        if (!seg->file.good()) {
--            seg->file.clear();
--            return false;
--        }
--
--        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
--        std::streamsize bytes_read = seg->file.gcount();
--        bool success = (bytes_read == SECTOR_SIZE);
--        seg->file.clear();
--        return success;
--    } else {
--        // ISO format - sectors are already 2048 bytes
--        std::streampos offset = static_cast<std::streampos>(local_lba) * SECTOR_SIZE;
--        seg->file.seekg(offset, std::ios::beg);
--
--        if (!seg->file.good()) {
--            seg->file.clear();
--            return false;
--        }
--
--        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
--        std::streamsize bytes_read = seg->file.gcount();
--        bool success = (bytes_read == SECTOR_SIZE);
--        seg->file.clear();
--        return success;
--    }
--}
--
-+
+ 
 +    if (!seg->data.empty()) {
 +        const uint64_t off = seg->raw
 +            ? static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET
@@ -3403,97 +2897,21 @@ index af866320..084d8732 100644
 +        return true;
 +    }
 +
-+    // Clear any error flags from a previous failed read
-+    seg->file.clear();
-+
-+    if (seg->raw) {
-+        // Raw BIN format - read full sector, extract user data
-+        std::streampos offset =
-+            static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET;
-+        seg->file.seekg(offset, std::ios::beg);
-+
-+        if (!seg->file.good()) {
-+            seg->file.clear();
-+            return false;
-+        }
-+
-+        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
-+        std::streamsize bytes_read = seg->file.gcount();
-+        bool success = (bytes_read == SECTOR_SIZE);
-+        seg->file.clear();
-+        return success;
-+    } else {
-+        // ISO format - sectors are already 2048 bytes
-+        std::streampos offset = static_cast<std::streampos>(local_lba) * SECTOR_SIZE;
-+        seg->file.seekg(offset, std::ios::beg);
-+
-+        if (!seg->file.good()) {
-+            seg->file.clear();
-+            return false;
-+        }
-+
-+        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
-+        std::streamsize bytes_read = seg->file.gcount();
-+        bool success = (bytes_read == SECTOR_SIZE);
-+        seg->file.clear();
-+        return success;
-+    }
-+}
-+
- bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
--    if (!is_open_ || !buffer) {
--        return false;
--    }
--
-+    if (!is_open_ || !buffer) {
-+        return false;
-+    }
-+
+     // Clear any error flags from a previous failed read
+     seg->file.clear();
+ 
+@@ -599,6 +955,7 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+     }
+ 
      if (chd_) return read_chd_raw(*chd_, lba, buffer, nullptr);
 +    if (folder_) return folder_read_raw(*folder_, lba, buffer);
  
      const BinSpan* span = SpanForLBA(lba);
      if (!span) {
--        return false;
--    }
-+        return false;
-+    }
-     if (span->segment < 0) {
-         // Cue PREGAP/POSTGAP: not stored in the dump; digital silence, the
-         // same as the CHD path's virtual pregap.
-@@ -615,352 +972,580 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
-         return false;
+@@ -616,6 +973,13 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
      }
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
--
--    seg->file.clear();
--    std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
--    seg->file.seekg(offset, std::ios::beg);
--    if (!seg->file.good()) {
--        seg->file.clear();
--        return false;
--    }
--
--    seg->file.read(reinterpret_cast<char*>(buffer), RAW_SECTOR_SIZE);
--    std::streamsize bytes_read = seg->file.gcount();
--    bool success = (bytes_read == RAW_SECTOR_SIZE);
--    seg->file.clear();
--    return success;
--}
--
--bool ISOReader::IsOpen() const {
--    return is_open_;
--}
--
--std::string ISOReader::GetVolumeID() const {
--    return volume_id_;
--}
--
--std::string ISOReader::GetBinPath() const {
--    return bin_path_;
--}
--
-+
+ 
 +    if (!seg->data.empty()) {
 +        const uint64_t off = static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE;
 +        if (off + RAW_SECTOR_SIZE > seg->data.size()) return false;
@@ -3501,614 +2919,23 @@ index af866320..084d8732 100644
 +        return true;
 +    }
 +
-+    seg->file.clear();
-+    std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
-+    seg->file.seekg(offset, std::ios::beg);
-+    if (!seg->file.good()) {
-+        seg->file.clear();
-+        return false;
-+    }
-+
-+    seg->file.read(reinterpret_cast<char*>(buffer), RAW_SECTOR_SIZE);
-+    std::streamsize bytes_read = seg->file.gcount();
-+    bool success = (bytes_read == RAW_SECTOR_SIZE);
-+    seg->file.clear();
-+    return success;
-+}
-+
-+bool ISOReader::IsOpen() const {
-+    return is_open_;
-+}
-+
-+std::string ISOReader::GetVolumeID() const {
-+    return volume_id_;
-+}
-+
-+std::string ISOReader::GetBinPath() const {
-+    return bin_path_;
-+}
-+
- uint32_t ISOReader::GetSectorCount() {
-     if (!is_open_) {
-         return 0;
-     }
-     if (chd_) return chd_->disc_sector_count;
-     return disc_sector_count_;
--}
--
--int ISOReader::TrackCount() const {
--    return static_cast<int>(tracks_.size());
--}
--
--uint32_t ISOReader::TrackStartLBA(int track) const {
--    for (const auto& t : tracks_) {
--        if (t.number == track) return t.start_lba;
--    }
--    return 0;
--}
--
--uint32_t ISOReader::TrackPregapLBA(int track) const {
--    for (const auto& t : tracks_) {
--        if (t.number == track) return t.pregap_lba;
--    }
--    return 0;
--}
--
--bool ISOReader::TrackIsAudio(int track) const {
--    for (const auto& t : tracks_) {
--        if (t.number == track) return t.is_audio;
--    }
--    return false;
--}
--
--RootDirectoryInfo ISOReader::GetRootDirectory() const {
--    return root_dir_;
--}
--
--uint32_t ISOReader::Read733(const uint8_t* data) const {
--    // Read little-endian half of both-endian 32-bit value
--    return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
--}
--
--bool ISOReader::ParseVolumeDescriptor() {
--    // Read Primary Volume Descriptor from sector 16
--    uint8_t pvd[SECTOR_SIZE];
--    if (!ReadSector(PVD_SECTOR, pvd)) {
+     seg->file.clear();
+     std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
+     seg->file.seekg(offset, std::ios::beg);
+@@ -887,7 +1251,7 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
+                 return true;
+             }
+         }
 -        return false;
--    }
--
--    // Verify ISO9660 signature: offset 1 should contain "CD001"
--    if (pvd[0] != 0x01 || std::memcmp(&pvd[1], "CD001", 5) != 0) {
--        return false;  // Not a valid ISO9660 disc
--    }
--
--    // Extract volume ID (offset 40, 32 bytes, space-padded ASCII)
--    volume_id_.clear();
--    for (int i = 0; i < 32; i++) {
--        char c = pvd[40 + i];
--        if (c != ' ' && c != '\0') {
--            volume_id_ += c;
--        }
--    }
--
--    // Extract root directory record (offset 156, 34 bytes)
--    const uint8_t* root_record = &pvd[156];
--
--    // Root directory LBA is at offset 2 within the directory record (both-endian 32-bit)
--    root_dir_.lba = Read733(&root_record[2]);
--
--    // Root directory size is at offset 10 within the directory record (both-endian 32-bit)
--    root_dir_.size = Read733(&root_record[10]);
--
--    return true;
--}
--
--bool ISOReader::ParseDirectoryRecord(const uint8_t* data, ISOFileEntry& entry) const {
--    // Check record length (offset 0)
--    uint8_t record_len = data[0];
--    if (record_len == 0 || record_len < 33) {
--        return false;  // Invalid or padding record
--    }
--
--    // Extract LBA (offset 2, both-endian 32-bit)
--    entry.lba = Read733(&data[2]);
--
--    // Extract file size (offset 10, both-endian 32-bit)
--    entry.size = Read733(&data[10]);
--
--    // Extract file flags (offset 25)
--    uint8_t flags = data[25];
--    entry.is_directory = (flags & 0x02) != 0;
--
--    // Extract filename length (offset 32)
--    uint8_t name_len = data[32];
--    if (name_len == 0) {
--        return false;  // Invalid record
--    }
--
--    // Extract filename (offset 33)
--    const char* name_ptr = reinterpret_cast<const char*>(&data[33]);
--
--    // Handle special directory entries
--    if (name_len == 1 && name_ptr[0] == '\x00') {
--        entry.name = ".";  // Current directory
--        return true;
--    }
--    if (name_len == 1 && name_ptr[0] == '\x01') {
--        entry.name = "..";  // Parent directory
--        return true;
--    }
--
--    // Parse regular filename, strip version suffix (";1")
--    entry.name.clear();
--    for (uint8_t i = 0; i < name_len; i++) {
--        char c = name_ptr[i];
--        if (c == ';') {
--            break;  // Stop at version separator
--        }
--        entry.name += c;
--    }
--
--    return true;
--}
--
--std::vector<ISOFileEntry> ISOReader::ListFilesByLBA(uint32_t lba, uint32_t dir_size) {
--    std::vector<ISOFileEntry> results;
--
--    if (!is_open_ || lba == 0 || dir_size == 0) {
--        return results;
--    }
--
--    // Calculate number of sectors needed for directory data
--    uint32_t num_sectors = (dir_size + 2047) / 2048;
--
--    // Allocate buffer for directory data
--    std::vector<uint8_t> dir_data(num_sectors * 2048, 0);
--
--    // Read all directory sectors
--    for (uint32_t i = 0; i < num_sectors; i++) {
--        if (!ReadSector(lba + i, &dir_data[i * 2048])) {
--            return results;  // Error reading sector
--        }
--    }
--
--    // Parse directory records
--    uint32_t offset = 0;
--    while (offset < dir_size) {
--        uint8_t record_len = dir_data[offset];
--
--        if (record_len == 0) {
--            // Skip to next sector boundary
--            uint32_t sector_offset = offset % 2048;
--            if (sector_offset != 0) {
--                offset += (2048 - sector_offset);
--                continue;
--            }
--            break;
--        }
--
--        if (offset + record_len > dir_data.size()) break;
--
--        ISOFileEntry entry;
--        if (ParseDirectoryRecord(&dir_data[offset], entry)) {
--            if (entry.name != "." && entry.name != "..") {
--                results.push_back(entry);
--            }
--        }
--
--        offset += record_len;
--    }
--
--    return results;
--}
--
--std::vector<ISOFileEntry> ISOReader::ListFiles(const std::string& path) {
--    std::vector<ISOFileEntry> results;
--
--    // Check if file is open
--    if (!is_open_) {
--        return results;
--    }
--
--    if (path.empty()) {
--        // List root directory
--        RootDirectoryInfo root = GetRootDirectory();
--        return ListFilesByLBA(root.lba, root.size);
--    }
--
--    // Non-empty path: navigate to that subdirectory within the root
--    // Find the matching directory entry in root
--    RootDirectoryInfo root = GetRootDirectory();
--    std::vector<ISOFileEntry> root_entries = ListFilesByLBA(root.lba, root.size);
--
--    std::string path_upper = path;
--    std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
--                   [](unsigned char c) { return std::toupper(c); });
--
--    for (const auto& e : root_entries) {
--        if (!e.is_directory) continue;
--        std::string name_upper = e.name;
--        std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
--                       [](unsigned char c) { return std::toupper(c); });
--        if (name_upper == path_upper) {
--            // Found the subdirectory — list its contents
--            return ListFilesByLBA(e.lba, e.size > 0 ? e.size : 2048);
--        }
--    }
--
--    return results;  // Directory not found
--}
--
--bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
--    // Check if file is open
--    if (!is_open_) {
--        return false;
--    }
--
--    // Check if path contains a directory separator
--    size_t sep = path.find('/');
--    if (sep == std::string::npos) {
--        sep = path.find('\\');
--    }
--
--    if (sep != std::string::npos) {
--        // Subdirectory path: "DIR/FILE" or "DIR\FILE"
--        std::string dir_name  = path.substr(0, sep);
--        std::string file_name = path.substr(sep + 1);
--
--        // List the subdirectory
--        std::vector<ISOFileEntry> sub_files = ListFiles(dir_name);
--
--        std::string file_upper = file_name;
--        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
--                       [](unsigned char c) { return std::toupper(c); });
--
--        for (const auto& f : sub_files) {
--            std::string name_upper = f.name;
--            std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
--                           [](unsigned char c) { return std::toupper(c); });
--            if (name_upper == file_upper) {
--                entry = f;
--                return true;
--            }
--        }
--        return false;
--    }
--
--    // Root-level file: search root directory
--    std::vector<ISOFileEntry> files = ListFiles("");
--
--    // Search for matching filename (case-insensitive comparison)
--    for (const auto& file : files) {
--        std::string file_upper = file.name;
--        std::string path_upper = path;
--
--        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
--                       [](unsigned char c) { return std::toupper(c); });
--        std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
--                       [](unsigned char c) { return std::toupper(c); });
--
--        if (file_upper == path_upper) {
--            entry = file;
--            return true;
--        }
--    }
--
--    // File not found
--    return false;
--}
--
--size_t ISOReader::ReadFile(const std::string& path, uint8_t* buffer, size_t max_size) {
--    // Validate buffer pointer
--    if (!buffer) {
--        return 0;
--    }
--
--    // Find the file
--    ISOFileEntry entry;
--    if (!FindFile(path, entry)) {
--        return 0;  // File not found
--    }
--
--    // Calculate how many bytes to read (min of file size and max_size)
--    size_t bytes_to_read = std::min(static_cast<size_t>(entry.size), max_size);
--
--    // Calculate number of sectors to read
--    uint32_t sectors_to_read = (bytes_to_read + SECTOR_SIZE - 1) / SECTOR_SIZE;
--
--    // Read sectors sequentially
--    size_t bytes_read = 0;
--    for (uint32_t i = 0; i < sectors_to_read; i++) {
--        // Calculate how many bytes to read from this sector
--        size_t bytes_remaining = bytes_to_read - bytes_read;
--        size_t sector_bytes = std::min(bytes_remaining, SECTOR_SIZE);
--
--        // Read sector into temporary buffer
--        uint8_t sector_buffer[SECTOR_SIZE];
--        if (!ReadSector(entry.lba + i, sector_buffer)) {
--            return bytes_read;  // Error - return what we've read so far
--        }
--
--        // Copy data to output buffer
--        std::memcpy(buffer + bytes_read, sector_buffer, sector_bytes);
--        bytes_read += sector_bytes;
--    }
--
--    return bytes_read;
--}
--
--size_t ISOReader::GetFileSize(const std::string& path) {
--    // Find the file
--    ISOFileEntry entry;
--    if (!FindFile(path, entry)) {
--        return 0;  // File not found
--    }
--
--    // Return file size
--    return entry.size;
--}
--
--} // namespace PS1
-+}
-+
-+int ISOReader::TrackCount() const {
-+    return static_cast<int>(tracks_.size());
-+}
-+
-+uint32_t ISOReader::TrackStartLBA(int track) const {
-+    for (const auto& t : tracks_) {
-+        if (t.number == track) return t.start_lba;
-+    }
-+    return 0;
-+}
-+
-+uint32_t ISOReader::TrackPregapLBA(int track) const {
-+    for (const auto& t : tracks_) {
-+        if (t.number == track) return t.pregap_lba;
-+    }
-+    return 0;
-+}
-+
-+bool ISOReader::TrackIsAudio(int track) const {
-+    for (const auto& t : tracks_) {
-+        if (t.number == track) return t.is_audio;
-+    }
-+    return false;
-+}
-+
-+RootDirectoryInfo ISOReader::GetRootDirectory() const {
-+    return root_dir_;
-+}
-+
-+uint32_t ISOReader::Read733(const uint8_t* data) const {
-+    // Read little-endian half of both-endian 32-bit value
-+    return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-+}
-+
-+bool ISOReader::ParseVolumeDescriptor() {
-+    // Read Primary Volume Descriptor from sector 16
-+    uint8_t pvd[SECTOR_SIZE];
-+    if (!ReadSector(PVD_SECTOR, pvd)) {
-+        return false;
-+    }
-+
-+    // Verify ISO9660 signature: offset 1 should contain "CD001"
-+    if (pvd[0] != 0x01 || std::memcmp(&pvd[1], "CD001", 5) != 0) {
-+        return false;  // Not a valid ISO9660 disc
-+    }
-+
-+    // Extract volume ID (offset 40, 32 bytes, space-padded ASCII)
-+    volume_id_.clear();
-+    for (int i = 0; i < 32; i++) {
-+        char c = pvd[40 + i];
-+        if (c != ' ' && c != '\0') {
-+            volume_id_ += c;
-+        }
-+    }
-+
-+    // Extract root directory record (offset 156, 34 bytes)
-+    const uint8_t* root_record = &pvd[156];
-+
-+    // Root directory LBA is at offset 2 within the directory record (both-endian 32-bit)
-+    root_dir_.lba = Read733(&root_record[2]);
-+
-+    // Root directory size is at offset 10 within the directory record (both-endian 32-bit)
-+    root_dir_.size = Read733(&root_record[10]);
-+
-+    return true;
-+}
-+
-+bool ISOReader::ParseDirectoryRecord(const uint8_t* data, ISOFileEntry& entry) const {
-+    // Check record length (offset 0)
-+    uint8_t record_len = data[0];
-+    if (record_len == 0 || record_len < 33) {
-+        return false;  // Invalid or padding record
-+    }
-+
-+    // Extract LBA (offset 2, both-endian 32-bit)
-+    entry.lba = Read733(&data[2]);
-+
-+    // Extract file size (offset 10, both-endian 32-bit)
-+    entry.size = Read733(&data[10]);
-+
-+    // Extract file flags (offset 25)
-+    uint8_t flags = data[25];
-+    entry.is_directory = (flags & 0x02) != 0;
-+
-+    // Extract filename length (offset 32)
-+    uint8_t name_len = data[32];
-+    if (name_len == 0) {
-+        return false;  // Invalid record
-+    }
-+
-+    // Extract filename (offset 33)
-+    const char* name_ptr = reinterpret_cast<const char*>(&data[33]);
-+
-+    // Handle special directory entries
-+    if (name_len == 1 && name_ptr[0] == '\x00') {
-+        entry.name = ".";  // Current directory
-+        return true;
-+    }
-+    if (name_len == 1 && name_ptr[0] == '\x01') {
-+        entry.name = "..";  // Parent directory
-+        return true;
-+    }
-+
-+    // Parse regular filename, strip version suffix (";1")
-+    entry.name.clear();
-+    for (uint8_t i = 0; i < name_len; i++) {
-+        char c = name_ptr[i];
-+        if (c == ';') {
-+            break;  // Stop at version separator
-+        }
-+        entry.name += c;
-+    }
-+
-+    return true;
-+}
-+
-+std::vector<ISOFileEntry> ISOReader::ListFilesByLBA(uint32_t lba, uint32_t dir_size) {
-+    std::vector<ISOFileEntry> results;
-+
-+    if (!is_open_ || lba == 0 || dir_size == 0) {
-+        return results;
-+    }
-+
-+    // Calculate number of sectors needed for directory data
-+    uint32_t num_sectors = (dir_size + 2047) / 2048;
-+
-+    // Allocate buffer for directory data
-+    std::vector<uint8_t> dir_data(num_sectors * 2048, 0);
-+
-+    // Read all directory sectors
-+    for (uint32_t i = 0; i < num_sectors; i++) {
-+        if (!ReadSector(lba + i, &dir_data[i * 2048])) {
-+            return results;  // Error reading sector
-+        }
-+    }
-+
-+    // Parse directory records
-+    uint32_t offset = 0;
-+    while (offset < dir_size) {
-+        uint8_t record_len = dir_data[offset];
-+
-+        if (record_len == 0) {
-+            // Skip to next sector boundary
-+            uint32_t sector_offset = offset % 2048;
-+            if (sector_offset != 0) {
-+                offset += (2048 - sector_offset);
-+                continue;
-+            }
-+            break;
-+        }
-+
-+        if (offset + record_len > dir_data.size()) break;
-+
-+        ISOFileEntry entry;
-+        if (ParseDirectoryRecord(&dir_data[offset], entry)) {
-+            if (entry.name != "." && entry.name != "..") {
-+                results.push_back(entry);
-+            }
-+        }
-+
-+        offset += record_len;
-+    }
-+
-+    return results;
-+}
-+
-+std::vector<ISOFileEntry> ISOReader::ListFiles(const std::string& path) {
-+    std::vector<ISOFileEntry> results;
-+
-+    // Check if file is open
-+    if (!is_open_) {
-+        return results;
-+    }
-+
-+    if (path.empty()) {
-+        // List root directory
-+        RootDirectoryInfo root = GetRootDirectory();
-+        return ListFilesByLBA(root.lba, root.size);
-+    }
-+
-+    // Non-empty path: navigate to that subdirectory within the root
-+    // Find the matching directory entry in root
-+    RootDirectoryInfo root = GetRootDirectory();
-+    std::vector<ISOFileEntry> root_entries = ListFilesByLBA(root.lba, root.size);
-+
-+    std::string path_upper = path;
-+    std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
-+                   [](unsigned char c) { return std::toupper(c); });
-+
-+    for (const auto& e : root_entries) {
-+        if (!e.is_directory) continue;
-+        std::string name_upper = e.name;
-+        std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
-+                       [](unsigned char c) { return std::toupper(c); });
-+        if (name_upper == path_upper) {
-+            // Found the subdirectory — list its contents
-+            return ListFilesByLBA(e.lba, e.size > 0 ? e.size : 2048);
-+        }
-+    }
-+
-+    return results;  // Directory not found
-+}
-+
-+bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
-+    // Check if file is open
-+    if (!is_open_) {
-+        return false;
-+    }
-+
-+    // Check if path contains a directory separator
-+    size_t sep = path.find('/');
-+    if (sep == std::string::npos) {
-+        sep = path.find('\\');
-+    }
-+
-+    if (sep != std::string::npos) {
-+        // Subdirectory path: "DIR/FILE" or "DIR\FILE"
-+        std::string dir_name  = path.substr(0, sep);
-+        std::string file_name = path.substr(sep + 1);
-+
-+        // List the subdirectory
-+        std::vector<ISOFileEntry> sub_files = ListFiles(dir_name);
-+
-+        std::string file_upper = file_name;
-+        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
-+                       [](unsigned char c) { return std::toupper(c); });
-+
-+        for (const auto& f : sub_files) {
-+            std::string name_upper = f.name;
-+            std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
-+                           [](unsigned char c) { return std::toupper(c); });
-+            if (name_upper == file_upper) {
-+                entry = f;
-+                return true;
-+            }
-+        }
 +        return FindFolderOnlyFile(path, entry);
-+    }
-+
-+    // Root-level file: search root directory
-+    std::vector<ISOFileEntry> files = ListFiles("");
-+
-+    // Search for matching filename (case-insensitive comparison)
-+    for (const auto& file : files) {
-+        std::string file_upper = file.name;
-+        std::string path_upper = path;
-+
-+        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
-+                       [](unsigned char c) { return std::toupper(c); });
-+        std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
-+                       [](unsigned char c) { return std::toupper(c); });
-+
-+        if (file_upper == path_upper) {
-+            entry = file;
-+            return true;
-+        }
-+    }
-+
+     }
+ 
+     // Root-level file: search root directory
+@@ -909,7 +1273,31 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
+         }
+     }
+ 
+-    // File not found
 +    return FindFolderOnlyFile(path, entry);
 +}
 +
@@ -4134,59 +2961,13 @@ index af866320..084d8732 100644
 +        entry.is_directory = false;
 +        return true;
 +    }
-+    return false;
-+}
-+
-+size_t ISOReader::ReadFile(const std::string& path, uint8_t* buffer, size_t max_size) {
-+    // Validate buffer pointer
-+    if (!buffer) {
-+        return 0;
-+    }
-+
-+    // Find the file
-+    ISOFileEntry entry;
-+    if (!FindFile(path, entry)) {
-+        return 0;  // File not found
-+    }
-+
-+    // Calculate how many bytes to read (min of file size and max_size)
-+    size_t bytes_to_read = std::min(static_cast<size_t>(entry.size), max_size);
-+
-+    // Calculate number of sectors to read
-+    uint32_t sectors_to_read = (bytes_to_read + SECTOR_SIZE - 1) / SECTOR_SIZE;
-+
-+    // Read sectors sequentially
-+    size_t bytes_read = 0;
-+    for (uint32_t i = 0; i < sectors_to_read; i++) {
-+        // Calculate how many bytes to read from this sector
-+        size_t bytes_remaining = bytes_to_read - bytes_read;
-+        size_t sector_bytes = std::min(bytes_remaining, SECTOR_SIZE);
-+
-+        // Read sector into temporary buffer
-+        uint8_t sector_buffer[SECTOR_SIZE];
-+        if (!ReadSector(entry.lba + i, sector_buffer)) {
-+            return bytes_read;  // Error - return what we've read so far
-+        }
-+
-+        // Copy data to output buffer
-+        std::memcpy(buffer + bytes_read, sector_buffer, sector_bytes);
-+        bytes_read += sector_bytes;
-+    }
-+
-+    return bytes_read;
-+}
-+
-+size_t ISOReader::GetFileSize(const std::string& path) {
-+    // Find the file
-+    ISOFileEntry entry;
-+    if (!FindFile(path, entry)) {
-+        return 0;  // File not found
-+    }
-+
-+    // Return file size
-+    return entry.size;
-+}
-+
+     return false;
+ }
+ 
+@@ -963,4 +1351,201 @@ size_t ISOReader::GetFileSize(const std::string& path) {
+     return entry.size;
+ }
+ 
 +bool ISOReader::ExtractToFolder(const std::string& image, const std::string& folder,
 +                                std::string* message) {
 +    namespace fs = std::filesystem;
@@ -4384,7 +3165,7 @@ index af866320..084d8732 100644
 +    return true;
 +}
 +
-+} // namespace PS1
+ } // namespace PS1
 diff --git a/runtime/src/iso_reader_c.cpp b/runtime/src/iso_reader_c.cpp
 index 0dc8e173..a147bcdb 100644
 --- a/runtime/src/iso_reader_c.cpp

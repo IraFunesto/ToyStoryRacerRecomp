@@ -22,7 +22,7 @@ a native 3D renderer for the tracks and a set of fixes on top.
 
 | | |
 |---|---|
-| Players | 2 (split screen) |
+| Players | 2 (split screen), up to 4 online |
 | Region | PAL (Europe) and NTSC (USA) |
 | Publisher | Disney Interactive |
 | Year | 2001 |
@@ -165,20 +165,23 @@ VSync on high-refresh monitors.
 Plus everything psxrecomp provides: high internal resolution, texture
 filtering, save states, controller rumble.
 
-**Online play (experimental)** — two players on two PCs, each with a
+**Online play (experimental)** — two to four players, one per PC, each with a
 full-screen view of their own kart (*Online play*, Fixes group, on by
-default):
+default). Played on one PC, the two-player game keeps its split screen:
 - On the main menu press **SELECT**: **Square** hosts (the game waits on the
   two-player character select), **Circle** joins: a window lists the games
   found on your PC's networks (LAN, Radmin, Hamachi...) or takes an IP
-  address and port. Then the two-player character and track select, as in a
-  local two-player game, with all the tracks.
+  address and port. Up to three players can join; the host sees how many
+  are in and presses **START** to begin (players 3 and 4 drive the race's
+  third and fourth karts, with their own character, HUD and sounds). Then
+  the character and track select, as in a local two-player game, with all
+  the tracks.
 - The host opens port **27450, TCP and UDP**, on the router, unless both
   players use a VPN such as Radmin VPN.
 - Both PCs need the **same disc version** (e.g. both USA) and the same mod
   options that change the game (frame rate, CPU overclock, track detail,
   polygon pool, music change, widescreen, instant loading, instant memory
-  card); the connection is refused with the name of the option that
+  card, voice language); the connection is refused with the name of the option that
   differs. Picture options (resolution, aspect, HUD size...) may differ.
 - **Rollback (experimental)**: *Online: response to your buttons* (Fixes
   group) = *Immediate (rollback, experimental)* on **both** PCs. Your
