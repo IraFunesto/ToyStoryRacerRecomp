@@ -277,22 +277,162 @@ diff --git a/runtime/include/iso_reader.h b/runtime/include/iso_reader.h
 index ff75e9c3..8567c578 100644
 --- a/runtime/include/iso_reader.h
 +++ b/runtime/include/iso_reader.h
-@@ -23,6 +23,7 @@
- namespace PS1 {
+@@ -1,12 +1,12 @@
+ #pragma once
  
- struct CHDState;
-+struct FolderDiscState;
+-#include <cstdint>
+-#include <array>
+-#include <string>
+-#include <fstream>
+-#include <memory>
+-#include <unordered_map>
+-#include <vector>
++#include <cstdint>
++#include <array>
++#include <string>
++#include <fstream>
++#include <memory>
++#include <unordered_map>
++#include <vector>
  
  /**
+  * ISO/BIN/CUE Reader for PS1 CD-ROM images
+@@ -20,10 +20,11 @@
+  * - Read file contents by path
+  */
+ 
+-namespace PS1 {
+-
+-struct CHDState;
+-
++namespace PS1 {
++
++struct CHDState;
++struct FolderDiscState;
++
+ /**
   * Information about a file entry in the ISO filesystem
-@@ -73,6 +74,7 @@ struct BinSegment {
-     uint32_t      start_lba;     // disc sector of this file's first stored sector
-     uint32_t      sector_count;  // sectors stored in this file
-     bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
-+    std::vector<uint8_t> data;   // whole file in memory (empty = read from file)
+  */
+@@ -44,21 +45,21 @@ struct RootDirectoryInfo {
+ 
+ /**
+  * A CD track parsed from the .cue sheet (or the synthesized single data
+- * track for a bare .bin/.iso). Multi-track discs can carry a
++ * track for a bare .bin/.iso). Multi-track discs can carry a
+  * Red Book CD-DA audio track after the data track; the CD model's TOC
+  * commands (GetTN/GetTD) must report them.
+  */
+-struct CDTrack {
++struct CDTrack {
+     int      number;     // 1-based track number
+     bool     is_audio;   // true = CD-DA audio (Red Book); false = data
+-    uint32_t start_lba;  // disc-relative start LBA (cue INDEX 01; track 1 = 0).
++    uint32_t start_lba;  // disc-relative start LBA (cue INDEX 01; track 1 = 0).
+                          // Single-FILE cues: equals the .bin-relative INDEX time.
+                          // Multi-FILE cues (redump "(Track N).bin" dumps): the
+-                         // owning file's first disc sector plus its INDEX time.
+-                         // Either way, plus every cue PREGAP/POSTGAP before it
+-                         // (gaps the dump does not store).
+-    uint32_t pregap_lba; // disc-relative start of the track's pregap: its cue
+-                         // PREGAP if any, else INDEX 00, else INDEX 01
++                         // owning file's first disc sector plus its INDEX time.
++                         // Either way, plus every cue PREGAP/POSTGAP before it
++                         // (gaps the dump does not store).
++    uint32_t pregap_lba; // disc-relative start of the track's pregap: its cue
++                         // PREGAP if any, else INDEX 00, else INDEX 01
  };
  
  /**
+@@ -70,23 +71,24 @@ struct CDTrack {
+ struct BinSegment {
+     std::string   path;          // resolved on-disk path
+     std::ifstream file;          // opened for the reader's lifetime
+-    uint32_t      start_lba;     // disc sector of this file's first stored sector
++    uint32_t      start_lba;     // disc sector of this file's first stored sector
+     uint32_t      sector_count;  // sectors stored in this file
+     bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
+-};
+-
+-/**
+- * A contiguous run of disc sectors. A stored span maps onto sectors of one
+- * BinSegment; a virtual span is a cue PREGAP/POSTGAP that the dump does not
+- * store and that reads back as zero (silence), as the CHD path already does.
+- * Without PREGAP/POSTGAP lines each file is exactly one stored span, so the
+- * disc layout is the plain concatenation of the files.
+- */
+-struct BinSpan {
+-    uint32_t disc_start;    // first disc-relative sector
+-    uint32_t sector_count;
+-    int      segment;       // index into segments_, or -1 for a virtual gap
+-    uint32_t file_sector;   // first sector within the segment's file
++    std::vector<uint8_t> data;   // whole file in memory (empty = read from file)
++};
++
++/**
++ * A contiguous run of disc sectors. A stored span maps onto sectors of one
++ * BinSegment; a virtual span is a cue PREGAP/POSTGAP that the dump does not
++ * store and that reads back as zero (silence), as the CHD path already does.
++ * Without PREGAP/POSTGAP lines each file is exactly one stored span, so the
++ * disc layout is the plain concatenation of the files.
++ */
++struct BinSpan {
++    uint32_t disc_start;    // first disc-relative sector
++    uint32_t sector_count;
++    int      segment;       // index into segments_, or -1 for a virtual gap
++    uint32_t file_sector;   // first sector within the segment's file
+ };
+ 
+ class ISOReader {
+@@ -103,7 +105,7 @@ public:
+ 
+     /**
+      * Open an ISO/BIN file for reading
+-     * @param filename Path to .iso, .bin, .img, .car, .cue, or .chd file
++     * @param filename Path to .iso, .bin, .img, .car, .cue, or .chd file
+      * @return true if opened successfully, false otherwise
+      */
+     bool Open(const std::string& filename);
+@@ -127,15 +129,15 @@ public:
+      * @param buffer Buffer to read into (must be at least 2352 bytes)
+      * @return true if the image stores raw sectors and read succeeded
+      */
+-    bool ReadRawSector(uint32_t lba, uint8_t* buffer);
+-
+-    /**
+-     * Read generated or SBI-replacement subchannel Q for a disc LBA.
+-     * SBI records intentionally carry invalid CRC data; valid is false for
+-     * those sectors so the CD controller can retain its last valid Q packet.
+-     */
+-    bool ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) const;
+-    bool HasSubChannelReplacements() const { return !subq_replacements_.empty(); }
++    bool ReadRawSector(uint32_t lba, uint8_t* buffer);
++
++    /**
++     * Read generated or SBI-replacement subchannel Q for a disc LBA.
++     * SBI records intentionally carry invalid CRC data; valid is false for
++     * those sectors so the CD controller can retain its last valid Q packet.
++     */
++    bool ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) const;
++    bool HasSubChannelReplacements() const { return !subq_replacements_.empty(); }
+ 
+     /**
+      * Check if a file is currently open
+@@ -163,11 +165,11 @@ public:
+     /**
+      * CD-track TOC accessors (multi-track .cue support).
+      * TrackCount() is >= 1 (a bare image synthesizes one data track).
+-     * TrackStartLBA(n)/TrackPregapLBA(n)/TrackIsAudio(n) take a 1-based track number.
++     * TrackStartLBA(n)/TrackPregapLBA(n)/TrackIsAudio(n) take a 1-based track number.
+      */
+-    int      TrackCount() const;
+-    uint32_t TrackStartLBA(int track) const;
+-    uint32_t TrackPregapLBA(int track) const;
++    int      TrackCount() const;
++    uint32_t TrackStartLBA(int track) const;
++    uint32_t TrackPregapLBA(int track) const;
+     bool     TrackIsAudio(int track) const;
+ 
+     /**
 @@ -190,6 +192,8 @@ public:
       * @return true if found, false if not found
       */
@@ -332,14 +472,43 @@ index ff75e9c3..8567c578 100644
      /**
       * Parse the Primary Volume Descriptor (sector 16)
       * Extracts volume ID and root directory information
-@@ -253,6 +279,7 @@ private:
-     std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
-     uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
-     std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
-+    std::unique_ptr<FolderDiscState> folder_; // present only for an extracted folder
-     std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
- };
+@@ -237,23 +263,24 @@ private:
+     std::vector<ISOFileEntry> ListFilesByLBA(uint32_t lba, uint32_t dir_size);
  
+     /**
+-     * Helper: find the span containing a disc-relative LBA.
+-     * @return span pointer, or nullptr when lba is past the disc end
++     * Helper: find the span containing a disc-relative LBA.
++     * @return span pointer, or nullptr when lba is past the disc end
+      */
+-    const BinSpan* SpanForLBA(uint32_t lba) const;
+-
+-    bool LoadSBICompanion(const std::string& image_path);
++    const BinSpan* SpanForLBA(uint32_t lba) const;
++
++    bool LoadSBICompanion(const std::string& image_path);
+ 
+     bool is_open_;
+     std::string volume_id_;
+     std::string bin_path_;          // first (data) segment; kept for callers
+     RootDirectoryInfo root_dir_;
+-    std::vector<CDTrack> tracks_;   // from the .cue TOC; >=1 entry after Open()
+-    std::vector<BinSegment> segments_;  // cue FILE entries in disc order; >=1 after Open()
+-    std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
+-    uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
+-    std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
+-    std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
+-};
++    std::vector<CDTrack> tracks_;   // from the .cue TOC; >=1 entry after Open()
++    std::vector<BinSegment> segments_;  // cue FILE entries in disc order; >=1 after Open()
++    std::vector<BinSpan> spans_;        // disc layout over segments_ + cue gaps
++    uint32_t disc_sector_count_ = 0;    // BIN/CUE: end of the last span
++    std::unique_ptr<CHDState> chd_; // present only for a directly mounted CHD
++    std::unique_ptr<FolderDiscState> folder_; // present only for an extracted folder
++    std::unordered_map<uint32_t, std::array<uint8_t, 12>> subq_replacements_;
++};
+ 
+ } // namespace PS1
 diff --git a/runtime/include/mod_memory.h b/runtime/include/mod_memory.h
 index 93c8de19..bc9de540 100644
 --- a/runtime/include/mod_memory.h
@@ -353,7 +522,7 @@ index 93c8de19..bc9de540 100644
  /* Allocations are fixed during activation. Snapshot allocated bytes, never
   * host pointers; immutable host assets are reconstructed separately. */
 diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
-index 471041bd..3d0d12e6 100644
+index 471041bd..10ff4b39 100644
 --- a/runtime/include/mod_plugins.h
 +++ b/runtime/include/mod_plugins.h
 @@ -1,5 +1,6 @@
@@ -455,7 +624,7 @@ index 471041bd..3d0d12e6 100644
  /* Experimental retained-texture service (currently OpenGL only). IDs are
   * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
   * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
-@@ -54,6 +133,16 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+@@ -54,6 +133,45 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
   * blending and destination-mask checks retain per-primitive isolation. Call
   * from activation or an emulation-thread render boundary. */
  void psx_mod_set_texture_bank_batching(int enabled);
@@ -464,6 +633,35 @@ index 471041bd..3d0d12e6 100644
 + * arena): batched in painter order on the single-pass dual-source path
 + * instead of one draw each. The game's own primitives keep their isolation. */
 +void psx_mod_set_native_packet_batching(int enabled);
++
++/* Direct drawing of a native renderer's triangles. Instead of a packet each,
++ * the plugin keeps its triangles in host memory and links one GP0 word
++ * PSX_MOD_NATIVE_BATCH_WORD(tag) into the ordering table where they belong;
++ * when the GPU reaches it, the batch hook is called and draws them with
++ * psx_mod_draw_native_tris -- through the same GPU path as the packets (draw
++ * area, list mute, widescreen), without building and walking the packets.
++ * The fields are those of a tagged GT3 packet and its suffixes. */
++typedef struct PSXModNativeTri {
++    uint32_t w[9];        /* the GT3 words: cmd|colour, xy, clut|uv, colour|bank lo, xy, tpage|uv, colour|bank hi, xy, uv */
++    float    q[3];        /* native depth weights (HTP suffix) */
++    float    xy[6];       /* exact positions */
++    float    uv[6];       /* exact texture coordinates */
++    uint32_t uvlim;       /* sampled texels lo_u lo_v hi_u hi_v */
++    uint8_t  depth_mode;  /* 0 = HTP1, 1 = HTP2, 2 = HTP3 */
++    uint8_t  uv_kind;     /* 0 none, 1 HTUV, 2 HTUL, 3 HTUB */
++    uint16_t bank;        /* host texture bank (0 = VRAM) */
++    float    qp[6], qe[4], quv[8];   /* HTUB quad map */
++    uint32_t qcol[4];
++} PSXModNativeTri;
++#define PSX_MOD_NATIVE_BATCH_WORD(tag) (0x00C0DE00u | ((uint32_t)(tag) & 0xFFu))
++typedef void (*PSXModNativeBatchHook)(uint32_t tag);
++void psx_mod_set_native_batch_hook(PSXModNativeBatchHook hook);
++/* Draw n triangles, last first when `reverse` (the order an ordering-table
++ * slot draws packets linked one after another). From the batch hook only. */
++void psx_mod_draw_native_tris(const PSXModNativeTri* t, int n, int reverse);
++/* Fix the widescreen X margin for the game's on-screen tests and the
++ * renderers (-1 = computed from this PC's aspect, the default). */
++void psx_mod_set_widescreen_x_margin(int32_t margin);
 +/* A packet arena rebuilt every frame: only its first `live` bytes (of `cap`
 + * from `address`) are kept in rollback snapshots. Call when `live` changes. */
 +void psx_mod_gpu_dma_set_live(uint32_t address, uint32_t cap, uint32_t live);
@@ -472,7 +670,7 @@ index 471041bd..3d0d12e6 100644
  /* A dedicated GPU-DMA packet arena. Only GT3 commands sourced from this
   * allocation interpret C1/C2's otherwise-unused high bytes as a bank ID:
   * id = (C1 >> 24) | ((C2 >> 24) << 8). ID zero uses ordinary VRAM. The rest
-@@ -105,6 +194,28 @@ int32_t psx_mod_widescreen_x_margin(void);
+@@ -105,6 +223,28 @@ int32_t psx_mod_widescreen_x_margin(void);
   * compositor translates it by the live reveal, excluding culling guards.
   * Guest coordinates, world sprites, and native 4:3 remain unchanged. */
  void psx_mod_tag_hud_primitive(uint32_t primitive, int edge);
@@ -501,9 +699,20 @@ index 471041bd..3d0d12e6 100644
  /* Exclude a known world packet from screen-space backdrop stretching, even
   * if it sorts before the first shaded polygon. Zero clears a recycled tag. */
  void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
-@@ -340,6 +451,19 @@ enum {
+@@ -339,7 +479,30 @@ enum {
+     PSX_MOD_RENDER_PASS_BUSY = 6
  };
  uint32_t psx_mod_render_pass_status(void);
++/*
++ * Run fn in a sandbox: guest code it calls (psx_dispatch_call) runs with time
++ * frozen, no interrupt, device stores dropped as in a pass; afterwards CPU
++ * state, RAM, scratchpad, interrupt/timer/DMA/GPU registers and clocks are
++ * exactly as before. Unlike a pass, what the GPU drew stays in VRAM. Returns
++ * fn's result (0 when refused or rolled back by the watchdog).
++ */
++int psx_mod_sandbox_call(struct CPUState* cpu,
++                         int (*fn)(struct CPUState* cpu, void* user),
++                         void* user);
  int psx_mod_set_auto_skip_fmv(int enabled);
 +/* Force port 1's button word (active-low; -1 releases it). */
 +void psx_mod_set_pad_override(int buttons);
@@ -732,10 +941,16 @@ index 0d82b7b9..560a6725 100644
  
  int psx_bios_hle_enabled(void)           { return s_call_hle_on; }
 diff --git a/runtime/src/boot_state.c b/runtime/src/boot_state.c
-index 8c263fc8..c6d4def0 100644
+index 8c263fc8..90e7f4c5 100644
 --- a/runtime/src/boot_state.c
 +++ b/runtime/src/boot_state.c
-@@ -381,6 +381,21 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
+@@ -377,10 +377,29 @@ static int write_vram_section_full(BsOut *o)
+     return ok;
+ }
+ 
++int g_boot_state_no_device_sync = 0;
++
+ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
                                uint32_t bios_checksum, uint32_t entry_pc) {
      BootStateHeader h;
      int ok;
@@ -747,8 +962,10 @@ index 8c263fc8..c6d4def0 100644
 +     * restored machine reached its next VBlank that many cycles late (a
 +     * thousand or more). Servicing early is neutral for the running machine. */
 +    {
++        /* (a rollback snapshot keeps the devices where they are: psx_modrb.c) */
++        extern int g_boot_state_no_device_sync;
 +        extern void psx_devices_mmio_sync(void);
-+        psx_devices_mmio_sync();
++        if (!g_boot_state_no_device_sync) psx_devices_mmio_sync();
 +        {   /* and the SPU, which the host pumps from the clock */
 +            extern void (*g_psx_pre_snapshot_hook)(void);
 +            if (g_psx_pre_snapshot_hook) g_psx_pre_snapshot_hook();
@@ -757,7 +974,7 @@ index 8c263fc8..c6d4def0 100644
      memset(&h, 0, sizeof h);
      h.magic         = BOOT_STATE_MAGIC;
      h.version       = psx_mod_memory_snapshot_bytes() ? BOOT_STATE_VERSION : 7u;
-@@ -425,7 +440,14 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
+@@ -425,7 +444,14 @@ static int boot_state_save_to(BsOut* o, const CPUState* cpu,
      if (ok) {
          /* §96 incremental mirror only while RB dirty-tracking is on.
           * Offline / delay-sync / zlib disk: classic full transfer_out. */
@@ -773,7 +990,7 @@ index 8c263fc8..c6d4def0 100644
              ok = sync_vram_mirror_for_save();
              if (ok) {
  #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-@@ -521,6 +543,26 @@ static int boot_state_save_buffer_ex(const CPUState* cpu, uint32_t bios_checksum
+@@ -521,6 +547,26 @@ static int boot_state_save_buffer_ex(const CPUState* cpu, uint32_t bios_checksum
      return 1;
  }
  
@@ -800,7 +1017,7 @@ index 8c263fc8..c6d4def0 100644
  int boot_state_save_buffer(const CPUState* cpu, uint32_t bios_checksum,
                             uint32_t entry_pc, uint8_t** out_data,
                             size_t* out_len) {
-@@ -622,6 +664,7 @@ static int apply_section(uint32_t tag, const uint8_t* p, uint32_t len,
+@@ -622,6 +668,7 @@ static int apply_section(uint32_t tag, const uint8_t* p, uint32_t len,
      case BS_SEC_GPU:
          return gpu_snapshot_read(p, len);
      case BS_SEC_VRAM: {
@@ -809,7 +1026,7 @@ index 8c263fc8..c6d4def0 100644
  #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
          /* Wire == host layout: upload straight from the section buffer. */
 diff --git a/runtime/src/cdrom.c b/runtime/src/cdrom.c
-index f12160a7..c20c3b4e 100644
+index f12160a7..e1e63a40 100644
 --- a/runtime/src/cdrom.c
 +++ b/runtime/src/cdrom.c
 @@ -660,10 +660,17 @@ static int sector_delay_cycles(void) {
@@ -865,7 +1082,7 @@ index f12160a7..c20c3b4e 100644
      if (!reading && !(stat_reg & (CDSTAT_READ | CDSTAT_PLAY)))
          return 5000;
      int lba = reading ? msf_to_lba(read_min, read_sec, read_sect)
-@@ -3246,6 +3262,12 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
+@@ -3246,6 +3262,13 @@ uint32_t cdrom_debug_copy_last_sector(uint32_t offset, uint32_t len,
   * must stay authentic. */
  int cdrom_load_in_progress(void) {
      if (xa_stream_active) return 0;
@@ -874,11 +1091,12 @@ index f12160a7..c20c3b4e 100644
 +     * load. Counting it engaged turbo-through-loads for a moment whenever a
 +     * voice clip started, and turbo presents only 1 frame in 30 -- a visible
 +     * freeze of the picture (Toy Story Racer menus). */
-+    if (reading && (mode_reg & 0x40u)) return 0;
++    if (reading && (mode_reg & 0x40u)) return 0;
++
      if (reading) return 1;
      if (s_burst_count > 0) {
          const CdBurst *b = &s_bursts[(s_burst_count - 1u) % CD_BURST_CAP];
-@@ -3256,7 +3278,7 @@ int cdrom_load_in_progress(void) {
+@@ -3256,7 +3279,7 @@ int cdrom_load_in_progress(void) {
  }
  
  int cdrom_data_read_active(void) {
@@ -887,7 +1105,22 @@ index f12160a7..c20c3b4e 100644
  }
  
  /* Savestate post-load: authentic CD second-response delays (ReadTOC ~30M
-@@ -3542,6 +3564,19 @@ uint32_t cdrom_mounted_sector_count(void) {
+@@ -3293,7 +3316,14 @@ static void cdrom_apply_savestate_delay_caps(int log_clamps) {
+         irq_present_set_remaining(CDROM_SAVESTATE_DELAY_CAP);
+ }
+ 
++/* Set by a plugin that runs the same game on several PCs from one state (an
++ * online session): the boost's caps are applied at each host present, whose
++ * place in guest time is the host's own, so the disc's timing (and from it the
++ * XA voices and the sound chip) would come out differently on each PC. */
++int g_cdrom_savestate_boost_off = 0;
++
+ void cdrom_accelerate_after_savestate(void) {
++    if (g_cdrom_savestate_boost_off) { s_savestate_cd_boost_vblanks = 0; return; }
+     const char *probe = getenv("PSX_POST_LOAD_PROBE");
+     const int log_probe = (probe && probe[0] == '1');
+     s_savestate_cd_boost_vblanks = CDROM_SAVESTATE_BOOST_VBLANKS;
+@@ -3542,6 +3572,19 @@ uint32_t cdrom_mounted_sector_count(void) {
      return iso_handle ? iso_sector_count(iso_handle) : 0u;
  }
  
@@ -1326,19 +1559,63 @@ index e102b03a..a30add2e 100644
          } else {
              state->hit_limit = 1;
 diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
-index b2857352..954fe478 100644
+index b2857352..f3484623 100644
 --- a/runtime/src/gpu.c
 +++ b/runtime/src/gpu.c
-@@ -72,6 +72,8 @@ static Gp0State gp0_state;
+@@ -1,3 +1,4 @@
++#include <math.h>
+ /* gpu.c — PS1 GPU hardware simulation (Phase 3, Step 1).
+  *
+  * Implements:
+@@ -72,6 +73,47 @@ static Gp0State gp0_state;
  static uint64_t gp0_write_count;
  static uint64_t gp0_nop_count, gp0_fill_count, gp0_draw_count, gp0_env_count, gp0_copy_count;
  static uint32_t gp0_cmd_buf[16];   /* max fixed-length command is 12 words */
++/* The native triangle being drawn directly (psx_mod_draw_native_tris): its
++ * suffix data instead of the packet readers (mod_texture_banks.c). */
++static const PSXModNativeTri* s_direct_tri;
++static PSXModNativeBatchHook s_native_batch_hook;
++
++/* The same checks as the packet suffix readers (mod_texture_banks.c). */
++static int direct_tri_precision(const PSXModNativeTri* t, float q[3], float xy[6]) {
++    for (int j = 0; j < 3; ++j) {
++        if (!isfinite(t->q[j]) || t->q[j] <= 0.0f || t->q[j] > 1.0f) return 0;
++        q[j] = t->q[j];
++    }
++    for (int j = 0; j < 6; ++j) {
++        if (!isfinite(t->xy[j]) || t->xy[j] < -2048.0f || t->xy[j] > 2048.0f) return 0;
++        xy[j] = t->xy[j];
++    }
++    return 1;
++}
++static int direct_tri_uv(const PSXModNativeTri* t, float uv[6], int lim[4]) {
++    if (!t->uv_kind) return 0;
++    for (int j = 0; j < 6; ++j) {
++        if (!isfinite(t->uv[j]) || t->uv[j] < -1.0f || t->uv[j] > 256.0f) return 0;
++        uv[j] = t->uv[j];
++    }
++    if (t->uv_kind == 1) return 1;
++    lim[0] = (int)(t->uvlim & 0xFFu);         lim[1] = (int)((t->uvlim >> 8) & 0xFFu);
++    lim[2] = (int)((t->uvlim >> 16) & 0xFFu); lim[3] = (int)(t->uvlim >> 24);
++    if (lim[0] > lim[2] || lim[1] > lim[3]) return 1;
++    return t->uv_kind == 3 ? 3 : 2;
++}
++static int direct_tri_quad(const PSXModNativeTri* t, float p[6], float e[4], float uv[8], uint32_t col[4]) {
++    for (int j = 0; j < 6; ++j) { if (!isfinite(t->qp[j]) || fabsf(t->qp[j]) > 1.0e6f) return 0; p[j] = t->qp[j]; }
++    for (int j = 0; j < 4; ++j) { if (!isfinite(t->qe[j]) || fabsf(t->qe[j]) > 1.0e6f) return 0; e[j] = t->qe[j]; }
++    for (int j = 0; j < 8; ++j) {
++        if (!isfinite(t->quv[j]) || t->quv[j] < -1.0f || t->quv[j] > 256.0f) return 0;
++        uv[j] = t->quv[j];
++    }
++    for (int j = 0; j < 4; ++j) col[j] = t->qcol[j] & 0xFFFFFFu;
++    return 1;
++}
 +uint32_t psx_gpu_list_read_word(uint32_t address);   /* memory.c */
 +static int s_list_mute;             /* psx_mod_set_list_mute */
  static int      gp0_words_collected;
  static int      gp0_words_needed;
  static uint32_t gp0_next_source_addr = 0xFFFFFFFFu;
-@@ -1562,6 +1564,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
+@@ -1562,6 +1604,16 @@ int psx_ws_cull_slti_lower(uint32_t sx, uint32_t imm) {
  int psx_ws_cull_bltz(uint32_t v) {
      return ((int32_t)v < -psx_ws_x_margin()) ? 1 : 0;
  }
@@ -1355,7 +1632,7 @@ index b2857352..954fe478 100644
  int psx_ws_cull_vxrange(uint32_t x, uint32_t imm) {
      int32_t margin = psx_ws_x_margin();
      uint32_t bound = (uint32_t)(int32_t)(int16_t)(uint16_t)imm;
-@@ -2856,12 +2868,109 @@ static void ws_clear_tagged_rect_reveal(int y, int h) {
+@@ -2856,12 +2908,109 @@ static void ws_clear_tagged_rect_reveal(int y, int h) {
   * a guessed finite-map side here: MMX6's authored layers enter the reveal at
   * different times, so the side guess produced a moving black trim over valid
   * stage art. A stale reveal tile is safer than deleting submitted content. */
@@ -1466,7 +1743,7 @@ index b2857352..954fe478 100644
      if (word_count == 0) {
          gp0_ot_rank = gp0_ot_rank == 0xFFFFu ? 0u
                                               : (uint16_t)(gp0_ot_rank + 1u);
-@@ -2870,6 +2979,7 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
+@@ -2870,6 +3019,7 @@ void gpu_set_gp0_linked_list_node(uint32_t addr, uint32_t word_count) {
  
  void gpu_ws_end_linked_list(void) {
      gp0_ot_rank = 0xFFFFu;
@@ -1474,7 +1751,7 @@ index b2857352..954fe478 100644
  }
  
  void gpu_ws_restore_linked_list_rank(uint32_t rank) {
-@@ -2879,6 +2989,11 @@ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
+@@ -2879,6 +3029,11 @@ void gpu_ws_restore_linked_list_rank(uint32_t rank) {
  
  /* Horizontal display range (GP1(06h)) */
  static uint32_t h_display_x1;
@@ -1486,7 +1763,7 @@ index b2857352..954fe478 100644
  static uint32_t h_display_x2;
  
  /* Vertical display range (GP1(07h)) */
-@@ -3512,7 +3627,29 @@ int gpu_display_is_depth24(void) {
+@@ -3512,7 +3667,29 @@ int gpu_display_is_depth24(void) {
      return (int)(display_depth & 1u);
  }
  
@@ -1516,7 +1793,7 @@ index b2857352..954fe478 100644
      out->display_x = display_area_x;
      out->display_y = display_area_y;
      out->depth24   = (int)(display_depth & 1u);
-@@ -3547,6 +3684,13 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
+@@ -3547,6 +3724,13 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
      PsxDisplayVerticalLayout vertical = psx_display_vertical_layout(
          video_mode != 0, v_display_y1, v_display_y2);
      uint32_t h = psx_display_source_height(vertical, 240u);
@@ -1530,7 +1807,7 @@ index b2857352..954fe478 100644
      uint32_t screen_h = vertical.range_set ? vertical.canvas_height : h;
      uint32_t screen_origin_y = vertical.valid ? vertical.canvas_origin_y : 0u;
      uint32_t screen_source_skip_y = vertical.valid ? vertical.source_skip_y : 0u;
-@@ -4251,6 +4395,8 @@ static void gp0_exec_textured_quad(void) {
+@@ -4251,6 +4435,8 @@ static void gp0_exec_textured_quad(void) {
      }
  }
  
@@ -1539,7 +1816,17 @@ index b2857352..954fe478 100644
  /* Execute shaded textured triangle (GP0 0x34-0x37) */
  static void gp0_exec_shaded_textured_tri(void) {
      int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
-@@ -4291,9 +4437,13 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4283,7 +4469,8 @@ static void gp0_exec_shaded_textured_tri(void) {
+     }
+     if (draw_area_out_bbox(vx, vy, 3)) return;
+ 
+-    uint16_t host_bank = mod_texture_packet_bank(gp0_cmd_source_addr, gp0_cmd_buf, 9u);
++    uint16_t host_bank = s_direct_tri ? s_direct_tri->bank
++                                      : mod_texture_packet_bank(gp0_cmd_source_addr, gp0_cmd_buf, 9u);
+     if (host_bank && (gr_backend() != GR_BACKEND_OPENGL ||
+                       !gl_renderer_select_texture_bank(host_bank))) return;
+ 
+@@ -4291,9 +4478,14 @@ static void gp0_exec_shaded_textured_tri(void) {
      prepare_precise_triangle(1, 4, 7,
                               vx, vy);
      prepare_texture_triangle(1, 4, 7);
@@ -1549,24 +1836,28 @@ index b2857352..954fe478 100644
 +    int native_depth = 0;
 +    {
          float q[3], xy[6];
-         if (mod_texture_packet_precision(gp0_cmd_source_addr, q, xy)) {
-+            native_depth = mod_texture_packet_depth_mode();
+-        if (mod_texture_packet_precision(gp0_cmd_source_addr, q, xy)) {
++        if (s_direct_tri ? direct_tri_precision(s_direct_tri, q, xy)
++                         : mod_texture_packet_precision(gp0_cmd_source_addr, q, xy)) {
++            native_depth = s_direct_tri ? s_direct_tri->depth_mode : mod_texture_packet_depth_mode();
              gr_set_precise_triangle(1,
                  (int32_t)((xy[0] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[1] + draw_offset_y) * 65536.0f),
-@@ -4302,12 +4452,27 @@ static void gp0_exec_shaded_textured_tri(void) {
+@@ -4302,12 +4494,29 @@ static void gp0_exec_shaded_textured_tri(void) {
                  (int32_t)((xy[4] + draw_offset_x) * 65536.0f),
                  (int32_t)((xy[5] + draw_offset_y) * 65536.0f));
              gr_set_perspective_triangle(1, q[0], q[1], q[2]);
 +            float uvf[6];
 +            int uvlim[4];
-+            int uvk = mod_texture_packet_uv(gp0_cmd_source_addr, uvf, uvlim);
++            int uvk = s_direct_tri ? direct_tri_uv(s_direct_tri, uvf, uvlim)
++                                   : mod_texture_packet_uv(gp0_cmd_source_addr, uvf, uvlim);
 +            if (uvk)
 +                gr_set_precise_uv(1, uvf, uvk >= 2 ? uvlim : NULL);
 +            if (uvk == 3) {
 +                float qp[6], qe[4], quv[8];
 +                uint32_t qcol[4];
-+                if (mod_texture_packet_quad(gp0_cmd_source_addr, qp, qe, quv, qcol))
++                if (s_direct_tri ? direct_tri_quad(s_direct_tri, qp, qe, quv, qcol)
++                                 : mod_texture_packet_quad(gp0_cmd_source_addr, qp, qe, quv, qcol))
 +                    gr_set_quad_map(1, qp, qe, quv, qcol);
 +            }
          }
@@ -1582,7 +1873,7 @@ index b2857352..954fe478 100644
      if (host_bank) (void)gl_renderer_select_texture_bank(0);
  }
  
-@@ -4708,9 +4873,11 @@ static void gp0_exec_draw_area_tl(void) {
+@@ -4708,9 +4917,11 @@ static void gp0_exec_draw_area_tl(void) {
      uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
      draw_area_left = param & 0x3FF;
      draw_area_top  = (param >> 10) & 0x3FF;
@@ -1596,7 +1887,7 @@ index b2857352..954fe478 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4721,9 +4888,11 @@ static void gp0_exec_draw_area_br(void) {
+@@ -4721,9 +4932,11 @@ static void gp0_exec_draw_area_br(void) {
      uint32_t param = gp0_cmd_buf[0] & 0x00FFFFFFu;
      draw_area_right  = param & 0x3FF;
      draw_area_bottom = (param >> 10) & 0x3FF;
@@ -1610,7 +1901,7 @@ index b2857352..954fe478 100644
      ws_nw_sync_target();  /* back buffer (draw_area_left) → wide mirror surface */
  }
  
-@@ -4737,6 +4906,8 @@ static void gp0_exec_draw_offset(void) {
+@@ -4737,6 +4950,8 @@ static void gp0_exec_draw_offset(void) {
      if (draw_offset_y < g_doff_min_this) g_doff_min_this = draw_offset_y;
      if (draw_offset_y > g_doff_max_this) g_doff_max_this = draw_offset_y;
      g_doff_cnt_this++;
@@ -1619,7 +1910,7 @@ index b2857352..954fe478 100644
      /* Native-wide mirrors framebuffer draws into a separate wide surface (canonical
       * VRAM stays faithful); the renderer needs the live draw offset to translate
       * into surface-local coords, so keep gr_set_draw_offset current. */
-@@ -5125,7 +5296,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+@@ -5125,7 +5340,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
              ws_ui_prepass_node_count = 0;
              return;
          }
@@ -1628,7 +1919,7 @@ index b2857352..954fe478 100644
          uint32_t num_words = (header >> 24) & 0xFFu;
          if (ws_ui_prepass_node_count >= WS_UI_PREPASS_NODE_MAX) {
              ws_ui_reject.cap++;
-@@ -5136,7 +5307,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+@@ -5136,7 +5351,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
          uint32_t payload[255];
          uint32_t first_addr = psx_mod_gpu_dma_resolve_address(addr + 4u);
          for (uint32_t i = 0; i < num_words; i++) {
@@ -1637,7 +1928,7 @@ index b2857352..954fe478 100644
                  first_addr + i * 4u));
          }
          WsUiPrepassNode *node =
-@@ -5152,7 +5323,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+@@ -5152,7 +5367,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                  psx_mod_gpu_dma_resolve_address(addr + 4u);
              uint32_t offset = 0;
              while (offset < num_words) {
@@ -1646,7 +1937,7 @@ index b2857352..954fe478 100644
                      psx_mod_gpu_dma_resolve_address(
                          word_addr + offset * 4u));
                  uint8_t op = (uint8_t)(first >> 24);
-@@ -5164,7 +5335,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
+@@ -5164,7 +5379,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                  if (op >= 0xA0u && op <= 0xBFu) break;
                  uint32_t words[12] = {0};
                  for (int i = 0; i < count && i < 12; i++) {
@@ -1655,7 +1946,41 @@ index b2857352..954fe478 100644
                          psx_mod_gpu_dma_resolve_address(
                              word_addr + (offset + (uint32_t)i) * 4u));
                  }
-@@ -5544,6 +5715,18 @@ static void gp0_execute_command(void) {
+@@ -5529,6 +5744,33 @@ void gpu_ws_census_set(int on) { ws_census_on = on ? 1 : 0; }
+ uint64_t gpu_ws_census_seq(void) { return ws_census_seq; }
+ 
+ /* Execute a fully-collected GP0 command */
++void psx_mod_set_native_batch_hook(PSXModNativeBatchHook hook) { s_native_batch_hook = hook; }
++
++static void gp0_execute_command(void);
++
++/* Draw native triangles directly: each runs through gp0_execute_command as
++ * its packet would, with the packet's words in gp0_cmd_buf and its suffix
++ * data from s_direct_tri; the command the GPU was executing (the batch word)
++ * is put back afterwards. */
++void psx_mod_draw_native_tris(const PSXModNativeTri* t, int n, int reverse) {
++    uint32_t save_buf[16];
++    const int save_needed = gp0_words_needed;
++    const uint32_t save_src = gp0_cmd_source_addr;
++    if (!t || n <= 0) return;
++    memcpy(save_buf, gp0_cmd_buf, sizeof save_buf);
++    for (int k = 0; k < n; ++k) {
++        const PSXModNativeTri* tri = &t[reverse ? n - 1 - k : k];
++        memcpy(gp0_cmd_buf, tri->w, sizeof tri->w);
++        gp0_words_needed = 9;
++        s_direct_tri = tri;
++        gp0_execute_command();
++        s_direct_tri = NULL;
++    }
++    memcpy(gp0_cmd_buf, save_buf, sizeof save_buf);
++    gp0_words_needed = save_needed;
++    gp0_cmd_source_addr = save_src;
++}
++
+ static void gp0_execute_command(void) {
+     uint8_t opcode = (gp0_cmd_buf[0] >> 24) & 0xFF;
+     gp0_opcode_count[opcode]++;
+@@ -5544,6 +5786,18 @@ static void gp0_execute_command(void) {
          ws_note_overhang(opcode);   /* 2D-only-scene classifier world signal */
      }
  
@@ -1674,7 +1999,20 @@ index b2857352..954fe478 100644
      /* Categorize for diagnostics */
      if (opcode <= 0x01) gp0_nop_count++;
      else if (opcode == 0x02) gp0_fill_count++;
-@@ -5900,11 +6083,13 @@ static void gpu_write_gp0_body(uint32_t val) {
+@@ -5553,6 +5807,12 @@ static void gp0_execute_command(void) {
+ 
+     switch (opcode) {
+         case 0x00:
++            if (s_native_batch_hook && (gp0_cmd_buf[0] & 0x00FFFF00u) == 0x00C0DE00u) {
++                s_native_batch_hook(gp0_cmd_buf[0] & 0xFFu);
++                break;
++            }
++            gp0_exec_nop();
++            break;
+         case 0x01:
+             gp0_exec_nop();
+             break;
+@@ -5900,11 +6160,13 @@ static void gpu_write_gp0_body(uint32_t val) {
      int word_count = gp0_command_word_count(opcode);
  
      if (word_count == 0) {
@@ -2276,11 +2614,56 @@ index c833f491..bf8ce17e 100644
  void gr_fill_rect(int x, int y, int w, int h, uint16_t c)  { g_b->fill_rect(x, y, w, h, c); }
  void gr_copy_rect(int sx, int sy, int dx, int dy, int w, int h) { g_b->copy_rect(sx, sy, dx, dy, w, h); }
  void gr_draw_flat_triangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) {
+diff --git a/runtime/src/interrupts.c b/runtime/src/interrupts.c
+index 43b7525e..218f207b 100644
+--- a/runtime/src/interrupts.c
++++ b/runtime/src/interrupts.c
+@@ -888,6 +888,7 @@ void interrupts_resync_after_restore(void) {
+     dispatch_count = 0;
+     in_exception = 0;
+     exception_nest_depth = 0;
++    { extern int g_psx_in_entry_hook; g_psx_in_entry_hook = 0; }   /* mod_runtime.cpp: a load leaves any hook */
+     last_sio_seq_seen = sio_get_seq();
+     last_sio_progress_cycle = psx_get_cycle_count();
+     s_defer_switch_pending = 0;
+@@ -2171,10 +2172,21 @@ irq_deliver_eval:
+  * interrupts via psx_check_interrupts (cpu->pc / scratch sentinel). Forwarding
+  * here gives the mmx6 baseline interrupt behavior — sufficient to build+run the
+  * current generated code on the good baseline for instrumented comparison. */
++/* A check made at a block edge, whose resume PC is that edge (a check made
++ * from elsewhere -- an MMIO poll inside a block -- still holds the PC of the
++ * last edge, an outer one: execution is not there). The rollback engine
++ * snapshots only inside one (psx_modrb_poll): resumed at the wrong PC, a
++ * replay ran another code path and its clock never matched the frames it
++ * replaced. */
++static int s_edge_check;
++int psx_interrupts_in_edge_check(void) { return s_edge_check; }
+ void psx_check_interrupts_at(CPUState* cpu, uint32_t resume_pc) {
+     uint32_t prev = s_compiled_interrupt_resume_pc;
++    const int prev_edge = s_edge_check;
+     s_compiled_interrupt_resume_pc = resume_pc;
++    s_edge_check = 1;
+     psx_check_interrupts(cpu); /* flushes load-charge batch on entry */
++    s_edge_check = prev_edge;
+     s_compiled_interrupt_resume_pc = prev;
+ }
+ 
+@@ -2184,6 +2196,10 @@ int psx_interrupts_checked_at_current_cycle(uint32_t resume_pc) {
+ }
+ 
+ void psx_check_interrupts_dispatch_entry(CPUState* cpu, uint32_t resume_pc) {
++    {   /* the rollback engine's snapshot point (psx_modrb.c) */
++        extern void psx_modrb_poll_dispatch(CPUState* cpu, uint32_t resume_pc);
++        if (!in_exception) psx_modrb_poll_dispatch(cpu, resume_pc);
++    }
+     if (psx_interrupts_checked_at_current_cycle(resume_pc)) {
+         return;
+     }
 diff --git a/runtime/src/iso_reader.cpp b/runtime/src/iso_reader.cpp
 index af866320..084d8732 100644
 --- a/runtime/src/iso_reader.cpp
 +++ b/runtime/src/iso_reader.cpp
-@@ -5,7 +5,9 @@
+@@ -5,21 +5,23 @@
  #include <filesystem>
  #include <algorithm>
  #include <cstring>
@@ -2288,9 +2671,36 @@ index af866320..084d8732 100644
  #include <cstdio>
 +#include <iterator>
  #include <limits>
+-
+-namespace PS1 {
+-
+-// PS1 CD-ROM sector size (Mode 2, Form 1 user data)
+-constexpr size_t SECTOR_SIZE = 2048;
+-
+-// Full sector size including headers/subchannel (2352 bytes for raw BIN files)
+-constexpr size_t RAW_SECTOR_SIZE = 2352;
+-
+-// Offset to user data in raw sector (Mode 2, Form 1)
+-constexpr size_t RAW_DATA_OFFSET = 24;
+-
+-// Primary Volume Descriptor location
++
++namespace PS1 {
++
++// PS1 CD-ROM sector size (Mode 2, Form 1 user data)
++constexpr size_t SECTOR_SIZE = 2048;
++
++// Full sector size including headers/subchannel (2352 bytes for raw BIN files)
++constexpr size_t RAW_SECTOR_SIZE = 2352;
++
++// Offset to user data in raw sector (Mode 2, Form 1)
++constexpr size_t RAW_DATA_OFFSET = 24;
++
++// Primary Volume Descriptor location
+ constexpr uint32_t PVD_SECTOR = 16;
  
- namespace PS1 {
-@@ -142,6 +144,324 @@ static bool read_chd_raw(CHDState& chd, uint32_t lba, uint8_t* buffer,
+ constexpr uint32_t CD_FRAMES_PER_SECOND = 75;
+@@ -142,25 +144,349 @@ static bool read_chd_raw(CHDState& chd, uint32_t lba, uint8_t* buffer,
      return true;
  }
  
@@ -2613,9 +3023,34 @@ index af866320..084d8732 100644
 +}
 +
  ISOReader::ISOReader()
-     : is_open_(false) {
-     root_dir_.lba = 0;
-@@ -161,6 +481,12 @@ bool ISOReader::Open(const std::string& filename) {
+-    : is_open_(false) {
+-    root_dir_.lba = 0;
+-    root_dir_.size = 0;
+-}
+-
+-ISOReader::~ISOReader() {
+-    Close();
+-}
+-
++    : is_open_(false) {
++    root_dir_.lba = 0;
++    root_dir_.size = 0;
++}
++
++ISOReader::~ISOReader() {
++    Close();
++}
++
+ bool ISOReader::Open(const std::string& filename) {
+-    // Close any previously opened image (also resets tracks/segments)
+-    Close();
+-
+-    // Check if file exists
++    // Close any previously opened image (also resets tracks/segments)
++    Close();
++
++    // Check if file exists
+     if (!std::filesystem::exists(filename)) {
          return false;
      }
  
@@ -2628,10 +3063,132 @@ index af866320..084d8732 100644
      if (PSXRecompV4::path_has_extension_ci(
              std::filesystem::path(filename), ".chd")) {
          auto state = std::make_unique<CHDState>();
-@@ -330,6 +656,19 @@ bool ISOReader::Open(const std::string& filename) {
-         seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
-                                                                  : SECTOR_SIZE));
+@@ -270,69 +596,82 @@ bool ISOReader::Open(const std::string& filename) {
+         return true;
+     }
+ 
+-    // Ordered list of BINARY files backing the disc. A bare .bin/.iso is a
+-    // single-entry list; a .cue contributes one entry per FILE line (redump
+-    // multi-track dumps ship one file per track).
+-    std::vector<std::string> bin_files;
+-
+-    // Tracks parsed from the cue. INDEX times in a cue are relative to the
+-    // OWNING FILE, so remember which file each track belongs to and convert
+-    // to disc-relative LBAs once the segment table (with each file's first
+-    // disc sector) is built below.
+-    using PendingTrack = PSXRecompV4::CueTrackRef;
+-    std::vector<PendingTrack> pending_tracks;
+-
+-    if (PSXRecompV4::path_has_extension_ci(std::filesystem::path(filename), ".cue")) {
+-        // Parse the .cue via the shared parser: resolve every FILE, AND build
+-        // the track TOC from the TRACK/INDEX lines. Single-file cues keep
+-        // their historical behavior; multi-file cues (data track + CD-DA audio
+-        // tracks in separate .bin files) map each file to a contiguous run of
+-        // disc sectors, concatenated in cue order.
+-        const PSXRecompV4::CueSheet sheet =
+-            PSXRecompV4::parse_cue_sheet(std::filesystem::path(filename));
+-
+-        // A cue we cannot read, one that names no FILE, or one whose payload is
+-        // not raw BINARY (WAVE/MP3 have no fixed sector geometry — mis-mapping
+-        // the TOC would be worse than refusing the image) has nothing to mount.
+-        if (!sheet.opened || sheet.files.empty() || sheet.has_non_binary_file()) {
+-            return false;
+-        }
+-
+-        bin_files.reserve(sheet.files.size());
+-        for (const PSXRecompV4::CueFileRef& f : sheet.files) {
+-            bin_files.push_back(f.path.string());
+-        }
+-        pending_tracks = sheet.tracks;
+-    } else {
+-        bin_files.push_back(filename);
+-    }
+-
+-    // Build the segment table: open every file and lay it out at the next
+-    // disc-relative sector. Every file must open — a multi-file dump with a
+-    // missing track file would otherwise silently read the wrong sectors.
+-    for (const std::string& bin_name : bin_files) {
+-        BinSegment seg;
+-        seg.path = bin_name;
+-        seg.file.open(bin_name, std::ios::binary);
+-        if (!seg.file.is_open()) {
+-            Close();
+-            return false;
+-        }
+-        seg.file.seekg(0, std::ios::end);
+-        const std::streampos file_size = seg.file.tellg();
+-        seg.file.clear();
+-        if (file_size <= 0) {
+-            Close();
+-            return false;
+-        }
+-        const uint64_t size = static_cast<uint64_t>(file_size);
+-        seg.raw          = (size % RAW_SECTOR_SIZE) == 0;
+-        seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
+-                                                                 : SECTOR_SIZE));
++    // Ordered list of BINARY files backing the disc. A bare .bin/.iso is a
++    // single-entry list; a .cue contributes one entry per FILE line (redump
++    // multi-track dumps ship one file per track).
++    std::vector<std::string> bin_files;
++
++    // Tracks parsed from the cue. INDEX times in a cue are relative to the
++    // OWNING FILE, so remember which file each track belongs to and convert
++    // to disc-relative LBAs once the segment table (with each file's first
++    // disc sector) is built below.
++    using PendingTrack = PSXRecompV4::CueTrackRef;
++    std::vector<PendingTrack> pending_tracks;
++
++    if (PSXRecompV4::path_has_extension_ci(std::filesystem::path(filename), ".cue")) {
++        // Parse the .cue via the shared parser: resolve every FILE, AND build
++        // the track TOC from the TRACK/INDEX lines. Single-file cues keep
++        // their historical behavior; multi-file cues (data track + CD-DA audio
++        // tracks in separate .bin files) map each file to a contiguous run of
++        // disc sectors, concatenated in cue order.
++        const PSXRecompV4::CueSheet sheet =
++            PSXRecompV4::parse_cue_sheet(std::filesystem::path(filename));
++
++        // A cue we cannot read, one that names no FILE, or one whose payload is
++        // not raw BINARY (WAVE/MP3 have no fixed sector geometry — mis-mapping
++        // the TOC would be worse than refusing the image) has nothing to mount.
++        if (!sheet.opened || sheet.files.empty() || sheet.has_non_binary_file()) {
++            return false;
++        }
++
++        bin_files.reserve(sheet.files.size());
++        for (const PSXRecompV4::CueFileRef& f : sheet.files) {
++            bin_files.push_back(f.path.string());
++        }
++        pending_tracks = sheet.tracks;
++    } else {
++        bin_files.push_back(filename);
++    }
++
++    // Build the segment table: open every file and lay it out at the next
++    // disc-relative sector. Every file must open — a multi-file dump with a
++    // missing track file would otherwise silently read the wrong sectors.
++    for (const std::string& bin_name : bin_files) {
++        BinSegment seg;
++        seg.path = bin_name;
++        seg.file.open(bin_name, std::ios::binary);
++        if (!seg.file.is_open()) {
++            Close();
++            return false;
++        }
++        seg.file.seekg(0, std::ios::end);
++        const std::streampos file_size = seg.file.tellg();
++        seg.file.clear();
++        if (file_size <= 0) {
++            Close();
++            return false;
++        }
++        const uint64_t size = static_cast<uint64_t>(file_size);
++        seg.raw          = (size % RAW_SECTOR_SIZE) == 0;
++        seg.sector_count = static_cast<uint32_t>(size / (seg.raw ? RAW_SECTOR_SIZE
++                                                                 : SECTOR_SIZE));
          seg.start_lba    = 0;  // assigned by the layout pass below
+-        segments_.push_back(std::move(seg));
+-    }
+-
 +        /* Keep the dump in memory (up to 1 GB): a sector read from the file
 +         * can block the emulation thread for tens of milliseconds when the
 +         * OS has not cached that part of the image yet (a visible hitch when
@@ -2645,18 +3202,136 @@ index af866320..084d8732 100644
 +            if (seg.file.gcount() != static_cast<std::streamsize>(size)) seg.data.clear();
 +            seg.file.clear();
 +        }
-         segments_.push_back(std::move(seg));
++        segments_.push_back(std::move(seg));
++    }
++
+     // Lay the files out on the disc and convert the pending cue tracks to
+     // disc-relative LBAs. INDEX times are file-relative; a cue PREGAP (before
+     // a track's INDEX 00/01) or POSTGAP (after its data) is a run of sectors
+@@ -392,29 +731,29 @@ bool ISOReader::Open(const std::string& filename) {
+             }
+         }
+         push_stored(si, cursor, n);
+-    }
++    }
+     disc_sector_count_ = disc;
+-
+-    // Synthesize a single data track for a bare .bin/.iso or a .cue with no
+-    // parseable TRACK entries, so TrackCount() is always >= 1.
+-    if (tracks_.empty()) {
+-        CDTrack t;
+-        t.number = 1; t.is_audio = false; t.start_lba = 0; t.pregap_lba = 0;
+-        tracks_.push_back(t);
+-    }
+-
+-    // Store the resolved data-track path for callers
+-    bin_path_ = segments_.front().path;
+-
+-    is_open_ = true;
+-
+-    // Parse the volume descriptor to extract filesystem metadata when
+-    // present. Runtime CD-ROM access only needs sector reads, so keep the
+-    // image mounted even if an ISO9660 header is missing or nonstandard.
++
++    // Synthesize a single data track for a bare .bin/.iso or a .cue with no
++    // parseable TRACK entries, so TrackCount() is always >= 1.
++    if (tracks_.empty()) {
++        CDTrack t;
++        t.number = 1; t.is_audio = false; t.start_lba = 0; t.pregap_lba = 0;
++        tracks_.push_back(t);
++    }
++
++    // Store the resolved data-track path for callers
++    bin_path_ = segments_.front().path;
++
++    is_open_ = true;
++
++    // Parse the volume descriptor to extract filesystem metadata when
++    // present. Runtime CD-ROM access only needs sector reads, so keep the
++    // image mounted even if an ISO9660 header is missing or nonstandard.
+     if (!ParseVolumeDescriptor()) {
+-        volume_id_.clear();
+-        root_dir_.lba = 0;
+-        root_dir_.size = 0;
++        volume_id_.clear();
++        root_dir_.lba = 0;
++        root_dir_.size = 0;
      }
  
-@@ -427,6 +766,7 @@ bool ISOReader::Open(const std::string& filename) {
+     if (!LoadSBICompanion(filename)) {
+@@ -424,24 +763,25 @@ bool ISOReader::Open(const std::string& filename) {
  
+     return true;
+ }
+-
++
  void ISOReader::Close() {
      chd_.reset();
+-    for (BinSegment& seg : segments_) {
+-        if (seg.file.is_open()) {
+-            seg.file.close();
+-        }
+-    }
+-    segments_.clear();
 +    folder_.reset();
-     for (BinSegment& seg : segments_) {
-         if (seg.file.is_open()) {
-             seg.file.close();
-@@ -544,6 +884,13 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
++    for (BinSegment& seg : segments_) {
++        if (seg.file.is_open()) {
++            seg.file.close();
++        }
++    }
++    segments_.clear();
+     spans_.clear();
+     disc_sector_count_ = 0;
+     tracks_.clear();
+     subq_replacements_.clear();
+-    bin_path_.clear();
+-    volume_id_.clear();
+-    root_dir_.lba = 0;
+-    root_dir_.size = 0;
+-    is_open_ = false;
++    bin_path_.clear();
++    volume_id_.clear();
++    root_dir_.lba = 0;
++    root_dir_.size = 0;
++    is_open_ = false;
+ }
+ 
+ bool ISOReader::LoadSBICompanion(const std::string& image_path) {
+@@ -516,23 +856,23 @@ bool ISOReader::ReadSubChannelQ(uint32_t lba, uint8_t* buffer, bool* valid) cons
+     *valid = true;
+     return true;
+ }
+-
++
+ const BinSpan* ISOReader::SpanForLBA(uint32_t lba) const {
+     // Linear scan: images carry a handful of spans (one per track file, plus
+     // one per cue gap).
+     for (const BinSpan& span : spans_) {
+         if (lba >= span.disc_start && lba - span.disc_start < span.sector_count) {
+             return &span;
+-        }
+-    }
+-    return nullptr;
+-}
+-
++        }
++    }
++    return nullptr;
++}
++
+ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+-    if (!is_open_ || !buffer) {
+-        return false;
+-    }
+-
++    if (!is_open_ || !buffer) {
++        return false;
++    }
++
+     if (chd_) {
+         uint8_t raw[RAW_SECTOR_SIZE];
+         CHDTrackMode mode;
+@@ -544,10 +884,17 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
          return true;
      }
  
@@ -2669,11 +3344,56 @@ index af866320..084d8732 100644
 +
      const BinSpan* span = SpanForLBA(lba);
      if (!span) {
-         return false;
-@@ -556,6 +903,15 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+-        return false;
+-    }
++        return false;
++    }
+     if (span->segment < 0) {
+         // Cue PREGAP/POSTGAP: not stored in the dump; reads back as zero.
+         std::memset(buffer, 0, SECTOR_SIZE);
+@@ -555,55 +902,65 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
+     }
      BinSegment* seg = &segments_[(size_t)span->segment];
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
- 
+-
+-    // Clear any error flags from a previous failed read
+-    seg->file.clear();
+-
+-    if (seg->raw) {
+-        // Raw BIN format - read full sector, extract user data
+-        std::streampos offset =
+-            static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET;
+-        seg->file.seekg(offset, std::ios::beg);
+-
+-        if (!seg->file.good()) {
+-            seg->file.clear();
+-            return false;
+-        }
+-
+-        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
+-        std::streamsize bytes_read = seg->file.gcount();
+-        bool success = (bytes_read == SECTOR_SIZE);
+-        seg->file.clear();
+-        return success;
+-    } else {
+-        // ISO format - sectors are already 2048 bytes
+-        std::streampos offset = static_cast<std::streampos>(local_lba) * SECTOR_SIZE;
+-        seg->file.seekg(offset, std::ios::beg);
+-
+-        if (!seg->file.good()) {
+-            seg->file.clear();
+-            return false;
+-        }
+-
+-        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
+-        std::streamsize bytes_read = seg->file.gcount();
+-        bool success = (bytes_read == SECTOR_SIZE);
+-        seg->file.clear();
+-        return success;
+-    }
+-}
+-
++
 +    if (!seg->data.empty()) {
 +        const uint64_t off = seg->raw
 +            ? static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET
@@ -2683,21 +3403,97 @@ index af866320..084d8732 100644
 +        return true;
 +    }
 +
-     // Clear any error flags from a previous failed read
-     seg->file.clear();
- 
-@@ -599,6 +955,7 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
-     }
- 
++    // Clear any error flags from a previous failed read
++    seg->file.clear();
++
++    if (seg->raw) {
++        // Raw BIN format - read full sector, extract user data
++        std::streampos offset =
++            static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE + RAW_DATA_OFFSET;
++        seg->file.seekg(offset, std::ios::beg);
++
++        if (!seg->file.good()) {
++            seg->file.clear();
++            return false;
++        }
++
++        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
++        std::streamsize bytes_read = seg->file.gcount();
++        bool success = (bytes_read == SECTOR_SIZE);
++        seg->file.clear();
++        return success;
++    } else {
++        // ISO format - sectors are already 2048 bytes
++        std::streampos offset = static_cast<std::streampos>(local_lba) * SECTOR_SIZE;
++        seg->file.seekg(offset, std::ios::beg);
++
++        if (!seg->file.good()) {
++            seg->file.clear();
++            return false;
++        }
++
++        seg->file.read(reinterpret_cast<char*>(buffer), SECTOR_SIZE);
++        std::streamsize bytes_read = seg->file.gcount();
++        bool success = (bytes_read == SECTOR_SIZE);
++        seg->file.clear();
++        return success;
++    }
++}
++
+ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+-    if (!is_open_ || !buffer) {
+-        return false;
+-    }
+-
++    if (!is_open_ || !buffer) {
++        return false;
++    }
++
      if (chd_) return read_chd_raw(*chd_, lba, buffer, nullptr);
 +    if (folder_) return folder_read_raw(*folder_, lba, buffer);
  
      const BinSpan* span = SpanForLBA(lba);
      if (!span) {
-@@ -616,6 +973,13 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+-        return false;
+-    }
++        return false;
++    }
+     if (span->segment < 0) {
+         // Cue PREGAP/POSTGAP: not stored in the dump; digital silence, the
+         // same as the CHD path's virtual pregap.
+@@ -615,352 +972,580 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
+         return false;
      }
      const uint32_t local_lba = span->file_sector + (lba - span->disc_start);
- 
+-
+-    seg->file.clear();
+-    std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
+-    seg->file.seekg(offset, std::ios::beg);
+-    if (!seg->file.good()) {
+-        seg->file.clear();
+-        return false;
+-    }
+-
+-    seg->file.read(reinterpret_cast<char*>(buffer), RAW_SECTOR_SIZE);
+-    std::streamsize bytes_read = seg->file.gcount();
+-    bool success = (bytes_read == RAW_SECTOR_SIZE);
+-    seg->file.clear();
+-    return success;
+-}
+-
+-bool ISOReader::IsOpen() const {
+-    return is_open_;
+-}
+-
+-std::string ISOReader::GetVolumeID() const {
+-    return volume_id_;
+-}
+-
+-std::string ISOReader::GetBinPath() const {
+-    return bin_path_;
+-}
+-
++
 +    if (!seg->data.empty()) {
 +        const uint64_t off = static_cast<uint64_t>(local_lba) * RAW_SECTOR_SIZE;
 +        if (off + RAW_SECTOR_SIZE > seg->data.size()) return false;
@@ -2705,23 +3501,614 @@ index af866320..084d8732 100644
 +        return true;
 +    }
 +
-     seg->file.clear();
-     std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
-     seg->file.seekg(offset, std::ios::beg);
-@@ -887,7 +1251,7 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
-                 return true;
-             }
-         }
++    seg->file.clear();
++    std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
++    seg->file.seekg(offset, std::ios::beg);
++    if (!seg->file.good()) {
++        seg->file.clear();
++        return false;
++    }
++
++    seg->file.read(reinterpret_cast<char*>(buffer), RAW_SECTOR_SIZE);
++    std::streamsize bytes_read = seg->file.gcount();
++    bool success = (bytes_read == RAW_SECTOR_SIZE);
++    seg->file.clear();
++    return success;
++}
++
++bool ISOReader::IsOpen() const {
++    return is_open_;
++}
++
++std::string ISOReader::GetVolumeID() const {
++    return volume_id_;
++}
++
++std::string ISOReader::GetBinPath() const {
++    return bin_path_;
++}
++
+ uint32_t ISOReader::GetSectorCount() {
+     if (!is_open_) {
+         return 0;
+     }
+     if (chd_) return chd_->disc_sector_count;
+     return disc_sector_count_;
+-}
+-
+-int ISOReader::TrackCount() const {
+-    return static_cast<int>(tracks_.size());
+-}
+-
+-uint32_t ISOReader::TrackStartLBA(int track) const {
+-    for (const auto& t : tracks_) {
+-        if (t.number == track) return t.start_lba;
+-    }
+-    return 0;
+-}
+-
+-uint32_t ISOReader::TrackPregapLBA(int track) const {
+-    for (const auto& t : tracks_) {
+-        if (t.number == track) return t.pregap_lba;
+-    }
+-    return 0;
+-}
+-
+-bool ISOReader::TrackIsAudio(int track) const {
+-    for (const auto& t : tracks_) {
+-        if (t.number == track) return t.is_audio;
+-    }
+-    return false;
+-}
+-
+-RootDirectoryInfo ISOReader::GetRootDirectory() const {
+-    return root_dir_;
+-}
+-
+-uint32_t ISOReader::Read733(const uint8_t* data) const {
+-    // Read little-endian half of both-endian 32-bit value
+-    return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+-}
+-
+-bool ISOReader::ParseVolumeDescriptor() {
+-    // Read Primary Volume Descriptor from sector 16
+-    uint8_t pvd[SECTOR_SIZE];
+-    if (!ReadSector(PVD_SECTOR, pvd)) {
 -        return false;
-+        return FindFolderOnlyFile(path, entry);
-     }
- 
-     // Root-level file: search root directory
-@@ -909,7 +1273,31 @@ bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
-         }
-     }
- 
+-    }
+-
+-    // Verify ISO9660 signature: offset 1 should contain "CD001"
+-    if (pvd[0] != 0x01 || std::memcmp(&pvd[1], "CD001", 5) != 0) {
+-        return false;  // Not a valid ISO9660 disc
+-    }
+-
+-    // Extract volume ID (offset 40, 32 bytes, space-padded ASCII)
+-    volume_id_.clear();
+-    for (int i = 0; i < 32; i++) {
+-        char c = pvd[40 + i];
+-        if (c != ' ' && c != '\0') {
+-            volume_id_ += c;
+-        }
+-    }
+-
+-    // Extract root directory record (offset 156, 34 bytes)
+-    const uint8_t* root_record = &pvd[156];
+-
+-    // Root directory LBA is at offset 2 within the directory record (both-endian 32-bit)
+-    root_dir_.lba = Read733(&root_record[2]);
+-
+-    // Root directory size is at offset 10 within the directory record (both-endian 32-bit)
+-    root_dir_.size = Read733(&root_record[10]);
+-
+-    return true;
+-}
+-
+-bool ISOReader::ParseDirectoryRecord(const uint8_t* data, ISOFileEntry& entry) const {
+-    // Check record length (offset 0)
+-    uint8_t record_len = data[0];
+-    if (record_len == 0 || record_len < 33) {
+-        return false;  // Invalid or padding record
+-    }
+-
+-    // Extract LBA (offset 2, both-endian 32-bit)
+-    entry.lba = Read733(&data[2]);
+-
+-    // Extract file size (offset 10, both-endian 32-bit)
+-    entry.size = Read733(&data[10]);
+-
+-    // Extract file flags (offset 25)
+-    uint8_t flags = data[25];
+-    entry.is_directory = (flags & 0x02) != 0;
+-
+-    // Extract filename length (offset 32)
+-    uint8_t name_len = data[32];
+-    if (name_len == 0) {
+-        return false;  // Invalid record
+-    }
+-
+-    // Extract filename (offset 33)
+-    const char* name_ptr = reinterpret_cast<const char*>(&data[33]);
+-
+-    // Handle special directory entries
+-    if (name_len == 1 && name_ptr[0] == '\x00') {
+-        entry.name = ".";  // Current directory
+-        return true;
+-    }
+-    if (name_len == 1 && name_ptr[0] == '\x01') {
+-        entry.name = "..";  // Parent directory
+-        return true;
+-    }
+-
+-    // Parse regular filename, strip version suffix (";1")
+-    entry.name.clear();
+-    for (uint8_t i = 0; i < name_len; i++) {
+-        char c = name_ptr[i];
+-        if (c == ';') {
+-            break;  // Stop at version separator
+-        }
+-        entry.name += c;
+-    }
+-
+-    return true;
+-}
+-
+-std::vector<ISOFileEntry> ISOReader::ListFilesByLBA(uint32_t lba, uint32_t dir_size) {
+-    std::vector<ISOFileEntry> results;
+-
+-    if (!is_open_ || lba == 0 || dir_size == 0) {
+-        return results;
+-    }
+-
+-    // Calculate number of sectors needed for directory data
+-    uint32_t num_sectors = (dir_size + 2047) / 2048;
+-
+-    // Allocate buffer for directory data
+-    std::vector<uint8_t> dir_data(num_sectors * 2048, 0);
+-
+-    // Read all directory sectors
+-    for (uint32_t i = 0; i < num_sectors; i++) {
+-        if (!ReadSector(lba + i, &dir_data[i * 2048])) {
+-            return results;  // Error reading sector
+-        }
+-    }
+-
+-    // Parse directory records
+-    uint32_t offset = 0;
+-    while (offset < dir_size) {
+-        uint8_t record_len = dir_data[offset];
+-
+-        if (record_len == 0) {
+-            // Skip to next sector boundary
+-            uint32_t sector_offset = offset % 2048;
+-            if (sector_offset != 0) {
+-                offset += (2048 - sector_offset);
+-                continue;
+-            }
+-            break;
+-        }
+-
+-        if (offset + record_len > dir_data.size()) break;
+-
+-        ISOFileEntry entry;
+-        if (ParseDirectoryRecord(&dir_data[offset], entry)) {
+-            if (entry.name != "." && entry.name != "..") {
+-                results.push_back(entry);
+-            }
+-        }
+-
+-        offset += record_len;
+-    }
+-
+-    return results;
+-}
+-
+-std::vector<ISOFileEntry> ISOReader::ListFiles(const std::string& path) {
+-    std::vector<ISOFileEntry> results;
+-
+-    // Check if file is open
+-    if (!is_open_) {
+-        return results;
+-    }
+-
+-    if (path.empty()) {
+-        // List root directory
+-        RootDirectoryInfo root = GetRootDirectory();
+-        return ListFilesByLBA(root.lba, root.size);
+-    }
+-
+-    // Non-empty path: navigate to that subdirectory within the root
+-    // Find the matching directory entry in root
+-    RootDirectoryInfo root = GetRootDirectory();
+-    std::vector<ISOFileEntry> root_entries = ListFilesByLBA(root.lba, root.size);
+-
+-    std::string path_upper = path;
+-    std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
+-                   [](unsigned char c) { return std::toupper(c); });
+-
+-    for (const auto& e : root_entries) {
+-        if (!e.is_directory) continue;
+-        std::string name_upper = e.name;
+-        std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
+-                       [](unsigned char c) { return std::toupper(c); });
+-        if (name_upper == path_upper) {
+-            // Found the subdirectory — list its contents
+-            return ListFilesByLBA(e.lba, e.size > 0 ? e.size : 2048);
+-        }
+-    }
+-
+-    return results;  // Directory not found
+-}
+-
+-bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
+-    // Check if file is open
+-    if (!is_open_) {
+-        return false;
+-    }
+-
+-    // Check if path contains a directory separator
+-    size_t sep = path.find('/');
+-    if (sep == std::string::npos) {
+-        sep = path.find('\\');
+-    }
+-
+-    if (sep != std::string::npos) {
+-        // Subdirectory path: "DIR/FILE" or "DIR\FILE"
+-        std::string dir_name  = path.substr(0, sep);
+-        std::string file_name = path.substr(sep + 1);
+-
+-        // List the subdirectory
+-        std::vector<ISOFileEntry> sub_files = ListFiles(dir_name);
+-
+-        std::string file_upper = file_name;
+-        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
+-                       [](unsigned char c) { return std::toupper(c); });
+-
+-        for (const auto& f : sub_files) {
+-            std::string name_upper = f.name;
+-            std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
+-                           [](unsigned char c) { return std::toupper(c); });
+-            if (name_upper == file_upper) {
+-                entry = f;
+-                return true;
+-            }
+-        }
+-        return false;
+-    }
+-
+-    // Root-level file: search root directory
+-    std::vector<ISOFileEntry> files = ListFiles("");
+-
+-    // Search for matching filename (case-insensitive comparison)
+-    for (const auto& file : files) {
+-        std::string file_upper = file.name;
+-        std::string path_upper = path;
+-
+-        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
+-                       [](unsigned char c) { return std::toupper(c); });
+-        std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
+-                       [](unsigned char c) { return std::toupper(c); });
+-
+-        if (file_upper == path_upper) {
+-            entry = file;
+-            return true;
+-        }
+-    }
+-
 -    // File not found
+-    return false;
+-}
+-
+-size_t ISOReader::ReadFile(const std::string& path, uint8_t* buffer, size_t max_size) {
+-    // Validate buffer pointer
+-    if (!buffer) {
+-        return 0;
+-    }
+-
+-    // Find the file
+-    ISOFileEntry entry;
+-    if (!FindFile(path, entry)) {
+-        return 0;  // File not found
+-    }
+-
+-    // Calculate how many bytes to read (min of file size and max_size)
+-    size_t bytes_to_read = std::min(static_cast<size_t>(entry.size), max_size);
+-
+-    // Calculate number of sectors to read
+-    uint32_t sectors_to_read = (bytes_to_read + SECTOR_SIZE - 1) / SECTOR_SIZE;
+-
+-    // Read sectors sequentially
+-    size_t bytes_read = 0;
+-    for (uint32_t i = 0; i < sectors_to_read; i++) {
+-        // Calculate how many bytes to read from this sector
+-        size_t bytes_remaining = bytes_to_read - bytes_read;
+-        size_t sector_bytes = std::min(bytes_remaining, SECTOR_SIZE);
+-
+-        // Read sector into temporary buffer
+-        uint8_t sector_buffer[SECTOR_SIZE];
+-        if (!ReadSector(entry.lba + i, sector_buffer)) {
+-            return bytes_read;  // Error - return what we've read so far
+-        }
+-
+-        // Copy data to output buffer
+-        std::memcpy(buffer + bytes_read, sector_buffer, sector_bytes);
+-        bytes_read += sector_bytes;
+-    }
+-
+-    return bytes_read;
+-}
+-
+-size_t ISOReader::GetFileSize(const std::string& path) {
+-    // Find the file
+-    ISOFileEntry entry;
+-    if (!FindFile(path, entry)) {
+-        return 0;  // File not found
+-    }
+-
+-    // Return file size
+-    return entry.size;
+-}
+-
+-} // namespace PS1
++}
++
++int ISOReader::TrackCount() const {
++    return static_cast<int>(tracks_.size());
++}
++
++uint32_t ISOReader::TrackStartLBA(int track) const {
++    for (const auto& t : tracks_) {
++        if (t.number == track) return t.start_lba;
++    }
++    return 0;
++}
++
++uint32_t ISOReader::TrackPregapLBA(int track) const {
++    for (const auto& t : tracks_) {
++        if (t.number == track) return t.pregap_lba;
++    }
++    return 0;
++}
++
++bool ISOReader::TrackIsAudio(int track) const {
++    for (const auto& t : tracks_) {
++        if (t.number == track) return t.is_audio;
++    }
++    return false;
++}
++
++RootDirectoryInfo ISOReader::GetRootDirectory() const {
++    return root_dir_;
++}
++
++uint32_t ISOReader::Read733(const uint8_t* data) const {
++    // Read little-endian half of both-endian 32-bit value
++    return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
++}
++
++bool ISOReader::ParseVolumeDescriptor() {
++    // Read Primary Volume Descriptor from sector 16
++    uint8_t pvd[SECTOR_SIZE];
++    if (!ReadSector(PVD_SECTOR, pvd)) {
++        return false;
++    }
++
++    // Verify ISO9660 signature: offset 1 should contain "CD001"
++    if (pvd[0] != 0x01 || std::memcmp(&pvd[1], "CD001", 5) != 0) {
++        return false;  // Not a valid ISO9660 disc
++    }
++
++    // Extract volume ID (offset 40, 32 bytes, space-padded ASCII)
++    volume_id_.clear();
++    for (int i = 0; i < 32; i++) {
++        char c = pvd[40 + i];
++        if (c != ' ' && c != '\0') {
++            volume_id_ += c;
++        }
++    }
++
++    // Extract root directory record (offset 156, 34 bytes)
++    const uint8_t* root_record = &pvd[156];
++
++    // Root directory LBA is at offset 2 within the directory record (both-endian 32-bit)
++    root_dir_.lba = Read733(&root_record[2]);
++
++    // Root directory size is at offset 10 within the directory record (both-endian 32-bit)
++    root_dir_.size = Read733(&root_record[10]);
++
++    return true;
++}
++
++bool ISOReader::ParseDirectoryRecord(const uint8_t* data, ISOFileEntry& entry) const {
++    // Check record length (offset 0)
++    uint8_t record_len = data[0];
++    if (record_len == 0 || record_len < 33) {
++        return false;  // Invalid or padding record
++    }
++
++    // Extract LBA (offset 2, both-endian 32-bit)
++    entry.lba = Read733(&data[2]);
++
++    // Extract file size (offset 10, both-endian 32-bit)
++    entry.size = Read733(&data[10]);
++
++    // Extract file flags (offset 25)
++    uint8_t flags = data[25];
++    entry.is_directory = (flags & 0x02) != 0;
++
++    // Extract filename length (offset 32)
++    uint8_t name_len = data[32];
++    if (name_len == 0) {
++        return false;  // Invalid record
++    }
++
++    // Extract filename (offset 33)
++    const char* name_ptr = reinterpret_cast<const char*>(&data[33]);
++
++    // Handle special directory entries
++    if (name_len == 1 && name_ptr[0] == '\x00') {
++        entry.name = ".";  // Current directory
++        return true;
++    }
++    if (name_len == 1 && name_ptr[0] == '\x01') {
++        entry.name = "..";  // Parent directory
++        return true;
++    }
++
++    // Parse regular filename, strip version suffix (";1")
++    entry.name.clear();
++    for (uint8_t i = 0; i < name_len; i++) {
++        char c = name_ptr[i];
++        if (c == ';') {
++            break;  // Stop at version separator
++        }
++        entry.name += c;
++    }
++
++    return true;
++}
++
++std::vector<ISOFileEntry> ISOReader::ListFilesByLBA(uint32_t lba, uint32_t dir_size) {
++    std::vector<ISOFileEntry> results;
++
++    if (!is_open_ || lba == 0 || dir_size == 0) {
++        return results;
++    }
++
++    // Calculate number of sectors needed for directory data
++    uint32_t num_sectors = (dir_size + 2047) / 2048;
++
++    // Allocate buffer for directory data
++    std::vector<uint8_t> dir_data(num_sectors * 2048, 0);
++
++    // Read all directory sectors
++    for (uint32_t i = 0; i < num_sectors; i++) {
++        if (!ReadSector(lba + i, &dir_data[i * 2048])) {
++            return results;  // Error reading sector
++        }
++    }
++
++    // Parse directory records
++    uint32_t offset = 0;
++    while (offset < dir_size) {
++        uint8_t record_len = dir_data[offset];
++
++        if (record_len == 0) {
++            // Skip to next sector boundary
++            uint32_t sector_offset = offset % 2048;
++            if (sector_offset != 0) {
++                offset += (2048 - sector_offset);
++                continue;
++            }
++            break;
++        }
++
++        if (offset + record_len > dir_data.size()) break;
++
++        ISOFileEntry entry;
++        if (ParseDirectoryRecord(&dir_data[offset], entry)) {
++            if (entry.name != "." && entry.name != "..") {
++                results.push_back(entry);
++            }
++        }
++
++        offset += record_len;
++    }
++
++    return results;
++}
++
++std::vector<ISOFileEntry> ISOReader::ListFiles(const std::string& path) {
++    std::vector<ISOFileEntry> results;
++
++    // Check if file is open
++    if (!is_open_) {
++        return results;
++    }
++
++    if (path.empty()) {
++        // List root directory
++        RootDirectoryInfo root = GetRootDirectory();
++        return ListFilesByLBA(root.lba, root.size);
++    }
++
++    // Non-empty path: navigate to that subdirectory within the root
++    // Find the matching directory entry in root
++    RootDirectoryInfo root = GetRootDirectory();
++    std::vector<ISOFileEntry> root_entries = ListFilesByLBA(root.lba, root.size);
++
++    std::string path_upper = path;
++    std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
++                   [](unsigned char c) { return std::toupper(c); });
++
++    for (const auto& e : root_entries) {
++        if (!e.is_directory) continue;
++        std::string name_upper = e.name;
++        std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
++                       [](unsigned char c) { return std::toupper(c); });
++        if (name_upper == path_upper) {
++            // Found the subdirectory — list its contents
++            return ListFilesByLBA(e.lba, e.size > 0 ? e.size : 2048);
++        }
++    }
++
++    return results;  // Directory not found
++}
++
++bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
++    // Check if file is open
++    if (!is_open_) {
++        return false;
++    }
++
++    // Check if path contains a directory separator
++    size_t sep = path.find('/');
++    if (sep == std::string::npos) {
++        sep = path.find('\\');
++    }
++
++    if (sep != std::string::npos) {
++        // Subdirectory path: "DIR/FILE" or "DIR\FILE"
++        std::string dir_name  = path.substr(0, sep);
++        std::string file_name = path.substr(sep + 1);
++
++        // List the subdirectory
++        std::vector<ISOFileEntry> sub_files = ListFiles(dir_name);
++
++        std::string file_upper = file_name;
++        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
++                       [](unsigned char c) { return std::toupper(c); });
++
++        for (const auto& f : sub_files) {
++            std::string name_upper = f.name;
++            std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
++                           [](unsigned char c) { return std::toupper(c); });
++            if (name_upper == file_upper) {
++                entry = f;
++                return true;
++            }
++        }
++        return FindFolderOnlyFile(path, entry);
++    }
++
++    // Root-level file: search root directory
++    std::vector<ISOFileEntry> files = ListFiles("");
++
++    // Search for matching filename (case-insensitive comparison)
++    for (const auto& file : files) {
++        std::string file_upper = file.name;
++        std::string path_upper = path;
++
++        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
++                       [](unsigned char c) { return std::toupper(c); });
++        std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
++                       [](unsigned char c) { return std::toupper(c); });
++
++        if (file_upper == path_upper) {
++            entry = file;
++            return true;
++        }
++    }
++
 +    return FindFolderOnlyFile(path, entry);
 +}
 +
@@ -2747,13 +4134,59 @@ index af866320..084d8732 100644
 +        entry.is_directory = false;
 +        return true;
 +    }
-     return false;
- }
- 
-@@ -963,4 +1351,201 @@ size_t ISOReader::GetFileSize(const std::string& path) {
-     return entry.size;
- }
- 
++    return false;
++}
++
++size_t ISOReader::ReadFile(const std::string& path, uint8_t* buffer, size_t max_size) {
++    // Validate buffer pointer
++    if (!buffer) {
++        return 0;
++    }
++
++    // Find the file
++    ISOFileEntry entry;
++    if (!FindFile(path, entry)) {
++        return 0;  // File not found
++    }
++
++    // Calculate how many bytes to read (min of file size and max_size)
++    size_t bytes_to_read = std::min(static_cast<size_t>(entry.size), max_size);
++
++    // Calculate number of sectors to read
++    uint32_t sectors_to_read = (bytes_to_read + SECTOR_SIZE - 1) / SECTOR_SIZE;
++
++    // Read sectors sequentially
++    size_t bytes_read = 0;
++    for (uint32_t i = 0; i < sectors_to_read; i++) {
++        // Calculate how many bytes to read from this sector
++        size_t bytes_remaining = bytes_to_read - bytes_read;
++        size_t sector_bytes = std::min(bytes_remaining, SECTOR_SIZE);
++
++        // Read sector into temporary buffer
++        uint8_t sector_buffer[SECTOR_SIZE];
++        if (!ReadSector(entry.lba + i, sector_buffer)) {
++            return bytes_read;  // Error - return what we've read so far
++        }
++
++        // Copy data to output buffer
++        std::memcpy(buffer + bytes_read, sector_buffer, sector_bytes);
++        bytes_read += sector_bytes;
++    }
++
++    return bytes_read;
++}
++
++size_t ISOReader::GetFileSize(const std::string& path) {
++    // Find the file
++    ISOFileEntry entry;
++    if (!FindFile(path, entry)) {
++        return 0;  // File not found
++    }
++
++    // Return file size
++    return entry.size;
++}
++
 +bool ISOReader::ExtractToFolder(const std::string& image, const std::string& folder,
 +                                std::string* message) {
 +    namespace fs = std::filesystem;
@@ -2951,7 +4384,7 @@ index af866320..084d8732 100644
 +    return true;
 +}
 +
- } // namespace PS1
++} // namespace PS1
 diff --git a/runtime/src/iso_reader_c.cpp b/runtime/src/iso_reader_c.cpp
 index 0dc8e173..a147bcdb 100644
 --- a/runtime/src/iso_reader_c.cpp
@@ -3103,7 +4536,7 @@ index 0dc8e173..a147bcdb 100644
      if (!handle) return 0;
      auto* reader = static_cast<PS1::ISOReader*>(handle);
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index a5241863..1a74508f 100644
+index a5241863..990382ad 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -16,6 +16,7 @@
@@ -3139,7 +4572,7 @@ index a5241863..1a74508f 100644
  static int      s_turbo_present_skip = 0;
  static int      s_fmv_skip_present_skip = 0;
  /* Netplay + depth24: present every other vblank (admit still every tick). */
-@@ -538,6 +550,17 @@ static int      s_d24_cutover_blank = 0;
+@@ -538,6 +550,18 @@ static int      s_d24_cutover_blank = 0;
  /* Savestate restore → audio pump: re-anchor last_cycles (declared early so
   * psx_frontend_on_savestate_loaded can set it). */
  static int      g_audio_cycle_resync = 0;
@@ -3153,11 +4586,12 @@ index a5241863..1a74508f 100644
 +/* Game opt-in (trusted plugin): never drop a backlog of samples -- every
 + * machine renders all the guest's samples (the game reads the envelopes). */
 +extern "C" { int g_psx_audio_no_drop = 0; }
++extern "C" { extern int g_psx_mod_lockstep; }   /* psx_cycles.c: a plugin's PCs-in-step session */
 +extern "C" { extern void (*g_psx_pre_snapshot_hook)(void); }   /* psx_cycles.c */
  
  static void smooth_60_reset(void) {
      g_smooth_60_state.previous_source.clear();
-@@ -1040,6 +1063,7 @@ extern "C" void psx_frontend_on_savestate_loaded(void) {
+@@ -1040,6 +1064,7 @@ extern "C" void psx_frontend_on_savestate_loaded(void) {
      s_fps_last_frame = 0;
      /* Re-anchor guest-cycle→sample budgeting (pump clears queued PCM too). */
      g_audio_cycle_resync = 1;
@@ -3165,7 +4599,28 @@ index a5241863..1a74508f 100644
      /* Depth24 FMV: drop ephemeral present hold/cutover so restored VRAM shows.
       * Upload span came back with the GPU snap; treat MDEC as already active if
       * depth24 is on so we don't full-black the first post-load presents. */
-@@ -1069,6 +1093,7 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
+@@ -1061,6 +1086,20 @@ extern "C" void psx_frontend_on_savestate_loaded(void) {
+     post_load_probe_arm();
+ }
+ 
++/* The guest cycles the sound chip has not been advanced through yet (the
++ * host pumps it from the clock), and setting them back: a rollback snapshot
++ * is taken WITHOUT pumping the chip first (pumping at the snapshot moved its
++ * IRQs: the snapshots alone made a race part from one without them), so the
++ * snapshot keeps this gap and a rewind restores it. */
++extern "C" uint64_t psx_audio_unpumped_cycles(void) {
++    extern uint64_t psx_cycle_count;
++    return s_audio_last_cycles && s_audio_last_cycles <= psx_cycle_count ? psx_cycle_count - s_audio_last_cycles : 0;
++}
++extern "C" void psx_audio_set_unpumped_cycles(uint64_t gap) {
++    extern uint64_t psx_cycle_count;
++    s_audio_last_cycles = gap < psx_cycle_count ? psx_cycle_count - gap : psx_cycle_count;
++}
++
+ /* Rollback snap apply / realign — keep depth24 hold clear + restage. Full
+  * savestate present thrash (post_load_probe) stays disk-only. When the tip
+  * is already in FMV/media, mirror the disk cutover reset so resume into
+@@ -1069,6 +1108,7 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
      const int media = gpu_display_is_depth24() || mdec_recently_active(8) ||
                        cdrom_fmv_stream_pending() || cdrom_xa_stream_active();
      g_audio_cycle_resync = 1;
@@ -3173,7 +4628,7 @@ index a5241863..1a74508f 100644
      gpu_depth24_on_savestate_loaded();
      s_d24_cutover_blank = 0;
      if (media) {
-@@ -1077,10 +1102,16 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
+@@ -1077,10 +1117,16 @@ extern "C" void psx_frontend_on_rb_snap_loaded(void) {
          s_disabled_frame_presented = false;
          s_force_present_after_load = true;
      }
@@ -3194,7 +4649,7 @@ index a5241863..1a74508f 100644
      /* §63: guest SIO came from the snap — drop Live pad-edge trackers. */
      psx_netplay_on_rb_snap_loaded();
  }
-@@ -1279,6 +1310,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
+@@ -1279,6 +1325,7 @@ static int           g_video_screen   = 0;  /* 0=raw,1=crt,2=composite,3=trinitr
  static int           g_video_win_w    = 0;    /* 0 = fit the display; see clamp_window_aspect */
  static bool          g_audio_spu_hq   = false; /* SPU float-shadow (env overrides) */
  static int           g_audio_freq     = 44100; /* host device request */
@@ -3202,7 +4657,7 @@ index a5241863..1a74508f 100644
  static int           g_auto_skip_fmv  = 0;   /* skip FMVs the instant they're detected */
  /* Local rewind is opt-in: the snap ring is whole-machine state on a frame
   * cadence, too much to charge every host for a feature many never open. */
-@@ -1661,6 +1693,14 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
+@@ -1661,6 +1708,14 @@ extern "C" int psx_mod_set_frame_interpolation_source(uint32_t source) {
      return 1;
  }
  
@@ -3217,7 +4672,7 @@ index a5241863..1a74508f 100644
  extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
      if (enabled != 0 && enabled != 1) {
          std::fprintf(stderr,
-@@ -2394,6 +2434,61 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
+@@ -2394,6 +2449,61 @@ static std::filesystem::path exe_dir_from_argv(const char* argv0) {
      return exe_dir;
  }
  
@@ -3279,7 +4734,7 @@ index a5241863..1a74508f 100644
  static std::filesystem::path resolve_existing_runtime_path(const char* requested,
                                                             const char* argv0) {
      namespace fs = std::filesystem;
-@@ -2834,6 +2929,12 @@ static std::filesystem::path resolve_disc_for_runtime(const std::filesystem::pat
+@@ -2834,6 +2944,12 @@ static std::filesystem::path resolve_disc_for_runtime(const std::filesystem::pat
                                                        const char* disc_override,
                                                        const std::string& game_id,
                                                        const char* argv0) {
@@ -3292,7 +4747,16 @@ index a5241863..1a74508f 100644
      if (disc_override && disc_override[0]) {
          std::filesystem::path p = normalize_disc_path_for_launch(disc_override);
          return validate_disc_for_launch(p, game_id) ? p : std::filesystem::path{};
-@@ -3471,32 +3572,27 @@ static void sdl_audio_pump(bool discard_output = false) {
+@@ -3417,7 +3533,7 @@ static void sdl_audio_pump(bool discard_output = false) {
+      * (queue full / !drc / no device) while the other kept advancing. */
+     const uint32_t bytes_per_frame = sizeof(int16_t) * 2u;
+     const bool legacy = audio_legacy_mode();
+-    const int netplay = psx_netplay_active();
++    const int netplay = psx_netplay_active() || g_psx_mod_lockstep;
+     static int had_audio = 0;
+     uint32_t queued = 0;   /* RENDER event b: bytes (legacy) / fill ms (bridge) */
+     int host_queue_ok = 0;
+@@ -3471,32 +3587,27 @@ static void sdl_audio_pump(bool discard_output = false) {
       * produced vs 44100/s consumed = recurring ring underruns no +/-0.5%
       * DRC trim could absorb during jitter spikes). */
      extern uint64_t psx_cycle_count;
@@ -3332,7 +4796,7 @@ index a5241863..1a74508f 100644
      }
  
      audio_trace_event(AUDIO_EV_RENDER, (uint32_t)frames, queued);
-@@ -3649,6 +3745,17 @@ struct RuntimePerfState {
+@@ -3649,6 +3760,17 @@ struct RuntimePerfState {
  
  static RuntimePerfState g_runtime_perf;
  
@@ -3350,7 +4814,7 @@ index a5241863..1a74508f 100644
  static bool runtime_perf_parse_window(const char *text, uint64_t *start,
                                        uint64_t *end) {
      if (!text || !text[0]) return false;
-@@ -3967,6 +4074,12 @@ static AudioGate s_audio_gate = AUDIO_GATE_NORMAL;
+@@ -3967,6 +4089,12 @@ static AudioGate s_audio_gate = AUDIO_GATE_NORMAL;
  
  /* Invoked from the guest-derived VBlank edge (interrupts.c). */
  static void sdl_audio_pump_midframe(void) {
@@ -3363,7 +4827,7 @@ index a5241863..1a74508f 100644
      /* Device optional: SPU still advances from guest cycles (netplay-safe). */
      switch (s_audio_gate) {
      case AUDIO_GATE_MUTED:
-@@ -5890,6 +6003,70 @@ done:
+@@ -5890,6 +6018,70 @@ done:
      freeze_heartbeat_set_paused(0);
  }
  
@@ -3434,7 +4898,7 @@ index a5241863..1a74508f 100644
  static void sample_pad_into_sio(int override) {
      /* Selfcheck fighter mash owns P1 when enabled (headless-safe). */
      if (override < 0) {
-@@ -5897,8 +6074,10 @@ static void sample_pad_into_sio(int override) {
+@@ -5897,8 +6089,10 @@ static void sample_pad_into_sio(int override) {
          if (psx_selfcheck_mash_override(&mash))
              override = (int)mash;
      }
@@ -3445,7 +4909,7 @@ index a5241863..1a74508f 100644
          return;
      }
      int n = g_offline_pad_count;
-@@ -5926,6 +6105,7 @@ static void sample_pad_into_sio(int override) {
+@@ -5926,6 +6120,7 @@ static void sample_pad_into_sio(int override) {
                                   0, 0);
          }
      }
@@ -3453,7 +4917,7 @@ index a5241863..1a74508f 100644
  }
  
  static void sample_headless_pad_into_sio(int override) {
-@@ -6773,12 +6953,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -6773,12 +6968,13 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
  
      /* Check debug server input override. */
      int override = debug_server_get_input_override();
@@ -3468,7 +4932,7 @@ index a5241863..1a74508f 100644
  #endif
  
      {
-@@ -7082,6 +7263,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -7082,6 +7278,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
           * the arm writes SIO once, host-latched, and would not replay. */
          psx_selfcheck_finish_frame(
              (g_offline_pad_count >= 3 && !sio_get_multitap()) ? 1 : 0);
@@ -3476,7 +4940,25 @@ index a5241863..1a74508f 100644
      }
      if (!g_headless) update_controller_rumble();
  
-@@ -7191,6 +7373,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -7101,7 +7298,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+     int load_run_value = 0;
+     static int load_run = 0;
+     static int release_run = 0;
+-    if (g_turbo_loads_enabled && !psx_netplay_active() &&
++    if (g_turbo_loads_enabled && !psx_netplay_active() && !g_psx_mod_lockstep &&
+         !psx_selfcheck_resim_active()) {
+         /* Require a short sustained predicate on entry, then retain turbo over
+          * a short false gap after it has engaged. Netplay / selfcheck keep
+@@ -7153,7 +7350,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+     int fmv_skip_active = 0;
+     /* Never inject START / poke movie totals under netplay — host-side skip
+      * forks peers (and stomps SIO after sealed publish during resim). */
+-    if (g_auto_skip_fmv && !psx_netplay_active() &&
++    if (g_auto_skip_fmv && !psx_netplay_active() && !g_psx_mod_lockstep &&
+         !psx_selfcheck_resim_active()) {
+         uint32_t mc = mdec_get_decode_count();
+         int mdec_decoding = (mc != s_fmv_skip_last_mdec);
+@@ -7191,6 +7388,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      if (!psx_netplay_is_resimulating() && !psx_selfcheck_resim_active()) {
          sdl_audio_update(fmv_skip_active,
                           turbo_loads_active && g_turbo_audio_sink_enabled);
@@ -3485,7 +4967,7 @@ index a5241863..1a74508f 100644
      }
  #endif
  
-@@ -7361,7 +7545,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -7361,7 +7560,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
           * vsync-light box). Re-stamp the ring's input mark to measure from here.
           * Self-check record keeps pads boundary-latched (netplay tick
           * semantics) — the mid-frame re-sample would fork the resim. */
@@ -3494,7 +4976,7 @@ index a5241863..1a74508f 100644
              SDL_GameControllerUpdate();  /* refresh pad state after the wait */
              SDL_PumpEvents();            /* refresh keyboard state */
              sample_pad_into_sio(override);
-@@ -7408,6 +7592,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
+@@ -7408,6 +7607,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
       * live every vblank. Frames at/below the watermark are a rewound
       * re-play; hold-last exactly as before so §63 edge-input re-show
       * (pad-log DUP_SIO) stays impossible. */
@@ -3507,7 +4989,7 @@ index a5241863..1a74508f 100644
      if (psx_netplay_is_resimulating()) {
          uint32_t rem = psx_netplay_rb_confirmed_remaining();
          uint32_t sim = psx_netplay_sim_tick();
-@@ -7920,6 +8110,7 @@ static void sdl_vblank_present(void) {
+@@ -7920,6 +8125,7 @@ static void sdl_vblank_present(void) {
       * further guest progress. Longjmps on success — keeps every resim load
       * on the same VBlank boundary (BB fast-poll tails forked #2 vs #3). */
      psx_selfcheck_flush_load();
@@ -3515,7 +4997,7 @@ index a5241863..1a74508f 100644
      if (!ep.do_epilogue)
          return;
      if (!psx_return_to_lobby_requested())
-@@ -7931,6 +8122,8 @@ static void sdl_vblank_present(void) {
+@@ -7931,6 +8137,8 @@ static void sdl_vblank_present(void) {
          return;
      if (psx_netplay_is_resimulating() || psx_netplay_rb_tip_holding())
          return;
@@ -3524,7 +5006,7 @@ index a5241863..1a74508f 100644
      if (!gpu_display_is_depth24() && psx_netplay_catchup_budget() > 0) {
          psx_netplay_catchup_consume_frame();
          return;
-@@ -8219,7 +8412,12 @@ namespace {
+@@ -8219,7 +8427,12 @@ namespace {
          // netplay-capable titles; ordinary offline disc verification is
          // strictly serial/header/optional-CRC based.
          if (!id.opened || !id.has_header)                            out->verdict = 3; // bad
@@ -3538,7 +5020,7 @@ index a5241863..1a74508f 100644
          else if (id.expected_crc_given && id.crc_computed && !id.crc_matches) out->verdict = 2; // warn
          else if (g_lnch_netplay_available && !id.netplay_ok)         out->verdict = 2; // TOC/cue
          else                                                          out->verdict = 1; // ok
-@@ -13030,6 +13228,7 @@ int main(int argc, char** argv) {
+@@ -13030,6 +13243,7 @@ int main(int argc, char** argv) {
                      gc.netplay_required_disc_fps[i];
              }
              if (!gc.discs.empty()) resolved_disc = gc.discs.front();
@@ -3546,7 +5028,7 @@ index a5241863..1a74508f 100644
              if (gc.runtime.has_memcard_dir)  memcard_dir   = gc.runtime.memcard_dir;
              if (gc.runtime.has_window_title) window_title  = gc.runtime.window_title;
              if (gc.runtime.has_debug_port)   debug_port    = gc.runtime.debug_port;
-@@ -14203,6 +14402,11 @@ int main(int argc, char** argv) {
+@@ -14203,6 +14417,11 @@ int main(int argc, char** argv) {
                      resolved_disc = cli_disc;
              }
              std::string rui_initial_disc = resolved_disc.string();
@@ -3558,7 +5040,7 @@ index a5241863..1a74508f 100644
              std::string rui_title = (game_name.empty() ? std::string("PSX") : game_name)
                                       + " - Launcher";
  
-@@ -14927,6 +15131,7 @@ int main(int argc, char** argv) {
+@@ -14927,6 +15146,7 @@ int main(int argc, char** argv) {
      if (game_config_path || disc_override_path || !resolved_disc.empty()) {
          resolved_disc = resolve_disc_for_runtime(
              resolved_disc, disc_override_path, game_id, argv[0]);
@@ -3566,7 +5048,7 @@ index a5241863..1a74508f 100644
          if (game_config_path && resolved_disc.empty()) {
              std::fprintf(stderr, "psxrecomp: no disc image selected; exiting.\n");
              return 1;
-@@ -15498,6 +15703,7 @@ session_reboot:
+@@ -15498,6 +15718,7 @@ session_reboot:
    if (g_headless) {
      audio_trace_init();
      psx_set_midframe_audio_pump(sdl_audio_pump_midframe);
@@ -3574,7 +5056,7 @@ index a5241863..1a74508f 100644
      sdl_audio_pump_midframe();
    }
  #endif
-@@ -15597,6 +15803,7 @@ session_reboot:
+@@ -15597,6 +15818,7 @@ session_reboot:
       * depend on a successful host open (Win↔Linux aux/spu fork). Routed
       * through the gated wrapper so turbo mute/sink still apply. */
      psx_set_midframe_audio_pump(sdl_audio_pump_midframe);
@@ -3791,7 +5273,7 @@ index 6f63240e..9b1b5407 100644
  uint8_t *g_psx_ram = ram;
  /* PSX_LOAD_DELAY gate (default on). −1 = unread; 0/1 after first resolve. */
 diff --git a/runtime/src/mod_runtime.cpp b/runtime/src/mod_runtime.cpp
-index d5600377..0d9d0d84 100644
+index d5600377..ceb3b922 100644
 --- a/runtime/src/mod_runtime.cpp
 +++ b/runtime/src/mod_runtime.cpp
 @@ -1,7 +1,10 @@
@@ -3895,7 +5377,22 @@ index d5600377..0d9d0d84 100644
      if (!s.initialized || !s.plan.ok) return;
      for (const ModResolution::Plugin& plugin : s.plan.plugins) {
          s.current_plugin = &plugin;
-@@ -1563,9 +1611,18 @@ extern "C" int psx_mod_register_function_entry_plugin(
+@@ -1523,6 +1571,14 @@ extern "C" int32_t psx_mod_widescreen_x_margin(void) {
+     return (int32_t)psx_ws_x_margin();
+ }
+ 
++/* Fix the widescreen X margin (-1 = computed from this PC's aspect again).
++ * The margin widens the game's own on-screen tests: two machines that must
++ * run the same game (online play) need the same one whatever their screens. */
++extern "C" void gpu_ws_set_margin_override(int v);
++extern "C" void psx_mod_set_widescreen_x_margin(int32_t margin) {
++    gpu_ws_set_margin_override(margin < 0 ? -1 : (int)margin);
++}
++
+ extern "C" void psx_mod_tag_hud_primitive(uint32_t primitive, int edge) {
+     gpu_ws_tag_hud_primitive(primitive, edge);
+ }
+@@ -1563,9 +1619,25 @@ extern "C" int psx_mod_register_function_entry_plugin(
      return mod_register_function_entry_plugin(id, address, callback) ? 1 : 0;
  }
  
@@ -3909,6 +5406,13 @@ index d5600377..0d9d0d84 100644
 +
 +/* Runs the hooks at a function entry; with can_skip, a hook that finished
 + * the function stops the rest and the caller returns to $ra. */
++/* Inside a plugin's function-entry hook (which may run guest code of its own
++ * through psx_dispatch_call): no rollback snapshot there (psx_modrb_poll) --
++ * its resume point would lie inside the hook's nested guest call, and the
++ * rest of the hook's work, on the host's stack, would be missing from a
++ * replay. Reset by a state load (interrupts_resync_after_restore). */
++extern "C" { int g_psx_in_entry_hook = 0; }
++
 +static int run_function_entry_hooks(CPUState* cpu, uint32_t address, int can_skip) {
      using namespace PSXRecompV4;
 -    if (!g_psx_mod_function_entry_hooks || !cpu) return;
@@ -3916,12 +5420,15 @@ index d5600377..0d9d0d84 100644
      RuntimeMods& s = state();
      const auto& table = active_function_entry_hooks();
      const uint32_t key = function_entry_key(address);
-@@ -1575,9 +1632,79 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
+@@ -1575,9 +1647,82 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
      for (; it != table.end() && it->key == key; ++it) {
          const ModResolution::Plugin* previous = s.current_plugin;
          s.current_plugin = it->plugin;
 +        s_function_finished = 0;
++        const int depth = g_psx_in_entry_hook;
++        g_psx_in_entry_hook = depth + 1;
          it->callback(cpu, address);
++        g_psx_in_entry_hook = depth;
          s.current_plugin = previous;
 +        const int finished = s_function_finished;
 +        s_function_finished = 0;
@@ -4118,7 +5625,7 @@ index d5767db1..702cc57c 100644
              memcpy(&f, &bits, sizeof f);
              if (!isfinite(f)) return 0;
 diff --git a/runtime/src/psx_cycles.c b/runtime/src/psx_cycles.c
-index 4bfe7460..9a99ceea 100644
+index 4bfe7460..db4365e0 100644
 --- a/runtime/src/psx_cycles.c
 +++ b/runtime/src/psx_cycles.c
 @@ -25,6 +25,10 @@ uint64_t psx_cycle_count = 0;
@@ -4173,12 +5680,63 @@ index 4bfe7460..9a99ceea 100644
      if (s_devices_synced_cycle < target) {
          /* Rewind and re-play the gap in event-bounded chunks so device
           * callbacks see the same incremental psx_cycle_count they always did
+@@ -453,13 +479,19 @@ static void idle_snapshot_regs(const CPUState *cpu) {
+     s_idle_lo = cpu->lo;
+ }
+ 
++/* A plugin runs the same game on several PCs in step (its own online play,
++ * not the framework's netplay): the host enhancements that fork peers stay
++ * off as under netplay (idle skip here; audio drop, turbo loads, FMV skip in
++ * main.cpp). */
++int g_psx_mod_lockstep = 0;
++
+ static int idle_skip_on(void) {
+     /* Cycle-skip is a host enhancement; under netplay it forks peers (detector
+      * streak / skip quanta are not part of the shared snap). Same for the
+      * solo resim self-check — keep the window on the faithful cycle path. */
+     extern int psx_netplay_active(void);
+     extern int psx_selfcheck_enabled(void);
+-    if (psx_netplay_active() || psx_selfcheck_enabled())
++    if (psx_netplay_active() || psx_selfcheck_enabled() || g_psx_mod_lockstep)
+         return 0;
+     if (g_idle_skip_enabled < 0) {
+         /* No game config reached this process (for example a BIOS-only
+@@ -598,7 +630,29 @@ void psx_idle_note_check(CPUState *cpu, uint32_t check_pc) {
+  * the deadline-model bookkeeping (synced position + next deadline) is stale and
+  * would try to replay a bogus gap. Re-anchor devices at the restored cycle and
+  * force a fresh deadline on the next charge. */
++/* The overclock's scaling remainder (psx_devices_service_to_now): host state
++ * that decides the next scaled step by a cycle. Not in a state: zeroed by a
++ * load (every PC of an online game then starts with the same) and kept by the
++ * rollback engine's snapshots (a replay with the live run's remainder ran a
++ * cycle apart). */
++uint64_t psx_cycles_overclock_rem(void) { return s_overclock_rem; }
++/* How far behind the clock the devices are, and when the next service is
++ * due (cycles from now, 0 = recompute): where the services fall decides,
++ * with the overclock's scaling, the instruction an interrupt is taken at. A
++ * rollback snapshot takes the devices as they are (no service of its own: it
++ * moved those points) and puts these back on a rewind. */
++void psx_cycles_service_point(uint64_t* behind, uint64_t* next_in) {
++    *behind = s_devices_synced_cycle <= psx_cycle_count ? psx_cycle_count - s_devices_synced_cycle : 0;
++    *next_in = psx_next_service_cycle > psx_cycle_count ? psx_next_service_cycle - psx_cycle_count : 0;
++}
++void psx_cycles_set_service_point(uint64_t behind, uint64_t next_in) {
++    s_devices_synced_cycle = behind <= psx_cycle_count ? psx_cycle_count - behind : 0;
++    psx_next_service_cycle = next_in ? psx_cycle_count + next_in : 0;
++}
++void psx_cycles_set_overclock_rem(uint64_t rem) { s_overclock_rem = rem; }
++
+ void psx_cycles_resync_after_restore(CPUState *cpu) {
++    s_overclock_rem = 0;
+     if (g_psx_cyc_local_acc) *g_psx_cyc_local_acc = 0;
+     g_psx_cyc_local_acc    = NULL;
+     g_psx_cyc_batch        = 0;
 diff --git a/runtime/src/psx_modrb.c b/runtime/src/psx_modrb.c
 new file mode 100644
-index 00000000..2490444f
+index 00000000..5f4c9e36
 --- /dev/null
 +++ b/runtime/src/psx_modrb.c
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,323 @@
 +/*
 + * Rollback for trusted plugins (a game's own online play).
 + *
@@ -4232,6 +5790,23 @@ index 00000000..2490444f
 +    uint32_t tick;
 +    uint32_t csv;
 +    uint64_t host_frame;
++    /* The CPU's timing state at the snapshot, not in the snapshot's CPU
++     * section (psx_cycles_resync_after_restore resets it for a user's load):
++     * the GTE / mul-div results still pending (cycles left) and the loads'
++     * give-back model. Reset on a rewind, the replay ran a few cycles ahead
++     * of the frames it replaces (2000 cycles at the first GTE read, 24 left
++     * at the next VBlank), the clocks parted and so did the disc's and the
++     * sound's timing (the sound library's tables at the end of a race). */
++    uint64_t gte_left, muldiv_left;
++    uint8_t  read_absorb[33];
++    uint8_t  read_absorb_which, read_fudge, ld_which_t;
++    uint32_t ld_absorb;
++    /* the CD audio waiting to be mixed (spu.c host ring) */
++    int16_t* cd;
++    uint32_t cd_frames, cd_cap;
++    uint64_t audio_gap;   /* guest cycles the sound chip was behind the clock */
++    uint64_t overclock_rem;   /* psx_cycles.c's scaling remainder */
++    uint64_t dev_behind, dev_next_in;   /* psx_cycles_service_point */
 +    int      valid;
 +} RbSnap;
 +
@@ -4332,11 +5907,39 @@ index 00000000..2490444f
 +    s_save_wait = 1;
 +}
 +
++static int rb_restore(RbSnap* s);
++
++static int s_at_dispatch;
++void psx_modrb_poll(CPUState* cpu, uint32_t resume_pc);
++/* interrupts.c psx_check_interrupts_dispatch_entry, outside exceptions */
++void psx_modrb_poll_dispatch(CPUState* cpu, uint32_t resume_pc) {
++    if (!s_on || !s_save_wait) return;
++    s_at_dispatch = 1;
++    psx_modrb_poll(cpu, resume_pc);
++    s_at_dispatch = 0;
++}
++
 +/* Safe BB-edge poll (beside savestate_poll): the deferred snapshot. */
 +void psx_modrb_poll(CPUState* cpu, uint32_t resume_pc) {
 +    if (!s_on || !s_save_wait || !cpu) return;
++    {   /* never inside a render pass or a plugin's sandbox call: its state is put back afterwards */
++        extern int psx_render_pass_nested(void);
++        if (psx_render_pass_nested()) return;
++    }
 +    s_cpu = cpu;
 +    if (s_load_wait) return;   /* about to rewind: this tick is taken again */
++    {   /* not inside a plugin hook's nested guest call (mod_runtime.cpp) */
++        extern int g_psx_in_entry_hook;
++        if (g_psx_in_entry_hook) return;
++    }
++    /* Only where the dispatcher enters a function or a continuation
++     * (psx_modrb_poll_dispatch): resuming there is exactly what happened. A
++     * check made elsewhere is not: inside a block (an MMIO poll) its resume PC
++     * is an outer edge's; at a return edge the return's last cycles are
++     * charged after the check, and a replay resumed there lacked them (2
++     * cycles, then a VBlank taken at another edge: the replay's clock never
++     * matched the frames it replaced). */
++    if (!s_at_dispatch) return;
 +    const uint32_t pc = pick_snap_pc(cpu, resume_pc);
 +    if (!pc) return;           /* retry at the next edge */
 +    RbSnap* s = &s_ring[s_tick % RB_RING];
@@ -4345,16 +5948,93 @@ index 00000000..2490444f
 +    s->valid = 0;
 +    const double t0 = now_ms();
 +    g_mod_memory_snapshot_lite = 1;
++    /* The sound chip is NOT pumped up to the clock for a rollback snapshot
++     * (boot_state's pre-snapshot hook): pumping it there moved its IRQs, so
++     * the snapshots themselves changed the game (a race with them parted from
++     * one without, and PCs snapshotting at different edges parted from each
++     * other). The cycles not yet pumped are kept instead (audio_gap). */
++    extern void (*g_psx_pre_snapshot_hook)(void);
++    extern uint64_t psx_audio_unpumped_cycles(void);
++    void (*pre_hook)(void) = g_psx_pre_snapshot_hook;
++    g_psx_pre_snapshot_hook = 0;
++    s->audio_gap = psx_audio_unpumped_cycles();
++    /* nor serviced: the devices stay behind the clock as they are, and the
++     * snapshot keeps how far (boot_state's own service moved the points
++     * where the services fall, so the snapshots changed the game) */
++    extern int g_boot_state_no_device_sync;
++    g_boot_state_no_device_sync = 1;
 +    const int ok = boot_state_save_buffer_reuse(&snap, s_bios, s_entry, &s->data, &s->cap, &s->len);
++    g_psx_pre_snapshot_hook = pre_hook;
++    g_boot_state_no_device_sync = 0;
 +    g_mod_memory_snapshot_lite = 0;
 +    s_save_wait = 0;
 +    if (!ok) { s_stats.save_failures++; return; }
 +    s->tick = s_tick;
 +    s->csv = interrupts_get_cycles_since_vblank();
++    {
++        extern uint64_t psx_cycle_count;
++        s->gte_left = cpu->gte_ts_done > psx_cycle_count ? cpu->gte_ts_done - psx_cycle_count : 0;
++        s->muldiv_left = cpu->muldiv_ts_done > psx_cycle_count ? cpu->muldiv_ts_done - psx_cycle_count : 0;
++        memcpy(s->read_absorb, cpu->read_absorb, sizeof s->read_absorb);
++        s->read_absorb_which = cpu->read_absorb_which;
++        s->read_fudge = cpu->read_fudge;
++        s->ld_which_t = cpu->ld_which_t;
++        s->ld_absorb = cpu->ld_absorb;
++    }
++    {
++        extern uint32_t spu_cd_audio_pending(void);
++        extern uint32_t spu_cd_audio_copy(int16_t* out, uint32_t max_frames);
++        const uint32_t n = spu_cd_audio_pending();
++        if (n > s->cd_cap) {
++            int16_t* b = (int16_t*)realloc(s->cd, (size_t)n * 4u);
++            if (b) { s->cd = b; s->cd_cap = n; }
++        }
++        s->cd_frames = s->cd ? spu_cd_audio_copy(s->cd, s->cd_cap) : 0;
++    }
++    { extern uint64_t psx_cycles_overclock_rem(void); s->overclock_rem = psx_cycles_overclock_rem(); }
++    { extern void psx_cycles_service_point(uint64_t*, uint64_t*); psx_cycles_service_point(&s->dev_behind, &s->dev_next_in); }
 +    s->host_frame = s_frame_count;
 +    s->valid = 1;
 +    s_stats.saves++;
 +    s_stats.save_ms += now_ms() - t0;
++}
++
++/* The machine as at snapshot s (1: done). */
++static int rb_restore(RbSnap* s) {
++    g_mod_memory_snapshot_lite = 1;
++    const int ok = boot_state_load_buffer(s->data, s->len, s_bios, s_entry, s_cpu);
++    g_mod_memory_snapshot_lite = 0;
++    if (!ok) return 0;
++    psx_cycles_resync_after_restore(s_cpu);
++    interrupts_resync_after_restore();
++    interrupts_set_cycles_since_vblank(s->csv);
++    { extern void psx_cycles_set_overclock_rem(uint64_t rem); psx_cycles_set_overclock_rem(s->overclock_rem); }
++    { extern void psx_cycles_set_service_point(uint64_t, uint64_t); psx_cycles_set_service_point(s->dev_behind, s->dev_next_in); }
++    {   /* the CPU's timing as it was (see RbSnap) */
++        extern uint64_t psx_cycle_count;
++        s_cpu->gte_ts_done = psx_cycle_count + s->gte_left;
++        s_cpu->muldiv_ts_done = psx_cycle_count + s->muldiv_left;
++        memcpy(s_cpu->read_absorb, s->read_absorb, sizeof s->read_absorb);
++        s_cpu->read_absorb_which = s->read_absorb_which;
++        s_cpu->read_fudge = s->read_fudge;
++        s_cpu->ld_which_t = s->ld_which_t;
++        s_cpu->ld_absorb = s->ld_absorb;
++    }
++    s_frame_count = s->host_frame;
++    overlay_loader_clear_lazy_miss();
++    {   /* the CD audio as it was waiting at the snapshot (not emptied: the
++         * replay then mixed other disc audio than the frames it replaces) */
++        extern void spu_cd_audio_restore(const int16_t* in, uint32_t frames);
++        if (s->cd) spu_cd_audio_restore(s->cd, s->cd_frames); else spu_cd_audio_reset();
++    }
++    psx_frontend_on_rb_snap_loaded();
++    {   /* the sound chip as far behind the clock as at the snapshot */
++        extern void psx_audio_set_unpumped_cycles(uint64_t gap);
++        psx_audio_set_unpumped_cycles(s->audio_gap);
++    }
++    gpu_vblank_release_present_flush_guard();
++    gpu_vblank_clear_deferred_present();
++    return 1;
 +}
 +
 +/* After the present body (main.cpp, beside psx_selfcheck_flush_load): the
@@ -4366,19 +6046,7 @@ index 00000000..2490444f
 +    if (!s->valid || s->tick != s_load_tick) { s_stats.load_failures++; return; }
 +    const uint32_t live_tick = s_tick;
 +    const double t0 = now_ms();
-+    g_mod_memory_snapshot_lite = 1;
-+    const int ok = boot_state_load_buffer(s->data, s->len, s_bios, s_entry, s_cpu);
-+    g_mod_memory_snapshot_lite = 0;
-+    if (!ok) { s_stats.load_failures++; return; }
-+    psx_cycles_resync_after_restore(s_cpu);
-+    interrupts_resync_after_restore();
-+    interrupts_set_cycles_since_vblank(s->csv);
-+    s_frame_count = s->host_frame;
-+    overlay_loader_clear_lazy_miss();
-+    spu_cd_audio_reset();
-+    psx_frontend_on_rb_snap_loaded();
-+    gpu_vblank_release_present_flush_guard();
-+    gpu_vblank_clear_deferred_present();
++    if (!rb_restore(s)) { s_stats.load_failures++; return; }
 +    /* the snapshots after this tick belong to the timeline being replaced */
 +    for (uint32_t i = 0; i < RB_RING; ++i)
 +        if (s_ring[i].valid && s_ring[i].tick > s_load_tick) s_ring[i].valid = 0;
@@ -4490,6 +6158,85 @@ index 0f0899be..ab481489 100644
      if (s_phase != SC_SAVE_WAIT && s_phase != SC_LOAD_WAIT)
          return;
      if (!cpu || psx_netplay_active())
+diff --git a/runtime/src/render_pass.c b/runtime/src/render_pass.c
+index 891f0d2c..4e0e3d10 100644
+--- a/runtime/src/render_pass.c
++++ b/runtime/src/render_pass.c
+@@ -215,6 +215,9 @@ static PsxCycleFreeze s_freeze;
+ static jmp_buf s_abort_jmp;
+ static volatile int s_abort_armed;
+ static int s_nesting;
++/* a render pass or sandbox call is running (the rollback engine takes no
++ * snapshot inside one: psx_modrb_poll) */
++int psx_render_pass_nested(void) { return s_nesting; }
+ 
+ static RenderPassStats s_stats;
+ static int s_verify = -1;
+@@ -600,3 +603,64 @@ int psx_mod_render_pass(struct CPUState *cpu, const PSXModRenderPass *pass,
+     gl_renderer_pass_service_presents();
+     return ok;
+ }
++
++/* ---- sandboxed guest calls ------------------------------------------------
++ * The same checkpoint and frozen clock as a pass, without the presenter: fn
++ * may run guest code (and draw), then CPU, RAM, scratchpad, I-cache, interrupt,
++ * timer, DMA and GPU registers and every clock value are put back. What the
++ * GPU drew stays in VRAM: the game's next frame is unchanged, only the image
++ * differs. For a view a single PC draws on its own (online, a player whose
++ * camera the game does not compute): no guest state of that PC changes. */
++int psx_mod_sandbox_call(struct CPUState *cpu,
++                         int (*fn)(struct CPUState *cpu, void *user),
++                         void *user) {
++    int ok = 0;
++    if (!cpu || !fn) return 0;
++    /* An exception handler may call it too (a game that draws its frame from
++     * its VSync callback): the whole CPU state is put back anyway. */
++    if (s_stats.disabled || s_nesting || g_psx_render_pass_active ||
++        dma_gpu_linked_list_active())
++        return 0;
++    if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
++    if (!checkpoint_save(cpu)) return 0;
++    uint64_t hash_before = verify_on() ? state_hash(cpu) : 0;
++    s_nesting = 1;
++    (void)psx_cycle_freeze_begin(&s_freeze, watchdog_cycles(),
++                                 watchdog_overrun);
++    if (setjmp(s_abort_jmp) == 0) {
++        s_abort_armed = 1;
++        ok = fn(cpu, user) ? 1 : 0;
++        s_abort_armed = 0;
++    } else {
++        if (g_overlay_flush_pending_cycles) g_overlay_flush_pending_cycles();
++        if (nesting_describe(&s_ck.nest, s_freeze.bb_defer, s_abort_detail,
++                             sizeof s_abort_detail))
++            s_stats.nesting_repairs++;
++        ok = 0;
++    }
++    checkpoint_restore(cpu);
++    psx_cycle_freeze_end(&s_freeze);
++    s_nesting = 0;
++    s_restored_valid = 0;
++    if (verify_on()) {   /* PSX_RENDER_PASS_VERIFY=1: the machine exactly as before */
++        const uint64_t hash_after = state_hash(cpu);
++        s_stats.verify_checks++;
++        if (hash_after != hash_before) {
++            s_stats.verify_mismatch++;
++            if (s_stats.verify_mismatch <= 8)
++                fprintf(stderr, "psxrecomp: SANDBOX VERIFY mismatch "
++                        "(state %016llx -> %016llx)\n",
++                        (unsigned long long)hash_before,
++                        (unsigned long long)hash_after);
++        }
++        if ((s_stats.verify_checks % 600u) == 0u) {
++            fprintf(stdout, "psxrecomp: sandbox verify %llu checks, %llu mismatches\n",
++                    (unsigned long long)s_stats.verify_checks,
++                    (unsigned long long)s_stats.verify_mismatch);
++            fflush(stdout);
++        }
++    }
++    if (s_stats.watchdog_flag) note_fault("guest-cycle watchdog (sandbox)");
++    s_stats.watchdog_flag = 0;
++    return ok;
++}
 diff --git a/runtime/src/savestate.c b/runtime/src/savestate.c
 index c9b42d53..8d846b6d 100644
 --- a/runtime/src/savestate.c
@@ -4562,6 +6309,41 @@ index ad61a306..ac449d58 100644
  static int sio_tick_quantum_cycles = 64;
  static int     sio_shift_active     = 0;
  static uint8_t sio_shift_byte       = 0;
+diff --git a/runtime/src/spu.c b/runtime/src/spu.c
+index 0e3c0340..54463678 100644
+--- a/runtime/src/spu.c
++++ b/runtime/src/spu.c
+@@ -418,6 +418,30 @@ void spu_cd_audio_reset(void) {
+     cd_underflow_frames = 0;
+ }
+ 
++/* The CD audio waiting to be mixed (host ring, not in the snapshots): copied
++ * out and put back by the rollback engine (psx_modrb.c), so a replayed frame
++ * mixes the same disc audio as the frame it replaces. */
++uint32_t spu_cd_audio_pending(void) { return cd_frame_count; }
++uint32_t spu_cd_audio_copy(int16_t* out, uint32_t max_frames) {
++    uint32_t n = cd_frame_count < max_frames ? cd_frame_count : max_frames;
++    for (uint32_t i = 0; i < n; i++) {
++        const uint32_t p = (cd_read_pos + i) % SPU_CD_RING_FRAMES;
++        out[i * 2u + 0u] = cd_ring[p * 2u + 0u];
++        out[i * 2u + 1u] = cd_ring[p * 2u + 1u];
++    }
++    return n;
++}
++void spu_cd_audio_restore(const int16_t* in, uint32_t frames) {
++    spu_cd_audio_reset();
++    if (frames > SPU_CD_RING_FRAMES) frames = SPU_CD_RING_FRAMES;
++    for (uint32_t i = 0; i < frames; i++) {
++        cd_ring[i * 2u + 0u] = in[i * 2u + 0u];
++        cd_ring[i * 2u + 1u] = in[i * 2u + 1u];
++    }
++    cd_write_pos = frames % SPU_CD_RING_FRAMES;
++    cd_frame_count = frames;
++}
++
+ void spu_cd_audio_push(const int16_t* stereo, int frames) {
+     if (!stereo || frames <= 0) return;
+ 
 diff --git a/runtime/tests/test_mod_runtime.cpp b/runtime/tests/test_mod_runtime.cpp
 index 49791598..431a6f50 100644
 --- a/runtime/tests/test_mod_runtime.cpp

@@ -487,6 +487,39 @@ typedef struct {
 
 Ctx *g_tsr_ctx;
 
+/*
+ * Direct drawing (psx_mod_draw_native_tris): the opaque faces drawn early in
+ * each view (the slot before the view's marker) are kept in host memory, per
+ * frame buffer, instead of a GT3 packet each; one GP0 word in the ordering
+ * table stands for each run of them and draws them when the GPU reaches it.
+ * A run is the faces emitted one after another for the same slot; the runs
+ * and the faces in a run are drawn last first, as linked packets were.
+ * Tag: buffer (bit 7), generation (bits 5-6), run (bits 0-4).
+ */
+#define DIRECT_MAX_TRIS 32768u
+#define DIRECT_MAX_RUNS 32u
+static PSXModNativeTri *s_dt[2];
+static uint32_t s_dt_n[2];
+static struct { uint32_t start, n, entry; } s_dr[2][DIRECT_MAX_RUNS];
+static uint32_t s_dr_n[2];
+static int      s_dr_cur[2] = { -1, -1 };
+static uint32_t s_dgen[2];
+static int      s_direct = -1;   /* -1 = read TSR_DIRECT (0 = packets, for comparison) */
+
+static void direct_reset(int buf) {
+    s_dt_n[buf] = 0;
+    s_dr_n[buf] = 0;
+    s_dr_cur[buf] = -1;
+    s_dgen[buf] = (s_dgen[buf] + 1u) & 3u;
+}
+
+static void direct_batch_hook(uint32_t tag) {
+    const int buf = (int)((tag >> 7) & 1u);
+    const uint32_t run = tag & 31u;
+    if (((tag >> 5) & 3u) != s_dgen[buf] || run >= s_dr_n[buf] || !s_dt[buf]) return;   /* stale */
+    psx_mod_draw_native_tris(s_dt[buf] + s_dr[buf][run].start, (int)s_dr[buf][run].n, 1);
+}
+
 static int clip_poly(NVert *in, int n, NVert *out, int plane) {
     /* plane 0: z >= NEAR; 1..4: screen guard band (x0, x1, y0, y1) in view space */
     int m = 0;
@@ -569,6 +602,36 @@ static int back_facing(const NVert *a, const NVert *b, const NVert *d) {
     return (nx * a->x + ny * a->y + nz * a->z >= 0.0f) ^ s_cull_flip;
 }
 
+/* A face slot in the current run for the slot `ot_entry` (a new run, with its
+ * GP0 word linked there, when the slot changed); NULL: draw it as a packet. */
+static PSXModNativeTri *direct_tri_alloc(Ctx *c, uint32_t ot_entry) {
+    const int buf = s_last_buf;
+    if (buf < 0 || buf > 1) return NULL;
+    if (!s_dt[buf]) {
+        s_dt[buf] = (PSXModNativeTri *)malloc(DIRECT_MAX_TRIS * sizeof(PSXModNativeTri));
+        if (!s_dt[buf]) return NULL;
+    }
+    if (s_dt_n[buf] >= DIRECT_MAX_TRIS) return NULL;
+    int r = s_dr_cur[buf];
+    if (r < 0 || s_dr[buf][r].entry != ot_entry) {
+        if (s_dr_n[buf] >= DIRECT_MAX_RUNS || c->out_used + 8u > c->out_cap || !ot_ok(c, ot_entry)) return NULL;
+        r = (int)s_dr_n[buf]++;
+        s_dr[buf][r].start = s_dt_n[buf];
+        s_dr[buf][r].n = 0;
+        s_dr[buf][r].entry = ot_entry;
+        s_dr_cur[buf] = r;
+        uint8_t *pk = c->out + c->out_used;
+        uint32_t addr = c->out_addr + c->out_used;
+        uint32_t prev = rd32(ot_entry);
+        put32(pk + 0, (prev & 0x00FFFFFFu) | (1u << 24));
+        put32(pk + 4, PSX_MOD_NATIVE_BATCH_WORD(((uint32_t)buf << 7) | (s_dgen[buf] << 5) | (uint32_t)r));
+        psx_mod_write_word(ot_entry, (prev & 0xFF000000u) | (addr & 0x00FFFFFFu));
+        c->out_used += 8u;
+    }
+    s_dr[buf][r].n++;
+    return &s_dt[buf][s_dt_n[buf]++];
+}
+
 static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
                      uint32_t cmd, uint16_t clut, uint16_t tpage, uint32_t ot_entry, int depth) {
     const int qm = s_qm.on && (cmd & 0xFCu) != 0x30u;
@@ -586,8 +649,10 @@ static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
      * nearer by a hair per slot it was nearer in the game's order, so the
      * face the game drew later still wins an exact tie. */
     float slot_nudge = 1.0f;
+    int early = 0;
     if (s_early_opaque && cmd == 0x34u && !s_force_glow && !s_no_depth &&
         c->marker_entry >= c->ot + 4u) {
+        early = 1;
         if (ot_entry >= c->ot && ot_entry <= c->marker_entry)
             slot_nudge = 1.0f + 4e-6f * (float)((c->marker_entry - ot_entry) >> 2);
         ot_entry = c->marker_entry - 4u;
@@ -708,6 +773,39 @@ static void emit_tri(Ctx *c, const NVert *a, const NVert *b, const NVert *d,
         const NVert *pv[3] = { pass ? v[0] : &uvert[0], pass ? v[1] : &uvert[1], pass ? v[2] : &uvert[2] };
         const float *pq = pass ? qa : uqa;
         const float qs = pass ? 1.0f : 0.997f;   /* underlay: a hair farther */
+        if (early && s_direct && !s_dbg_nosuffix) {
+            PSXModNativeTri *t = direct_tri_alloc(c, ot_entry);
+            if (t) {
+                t->w[0] = (cmd << 24) | pack_col(pv[0]);
+                t->w[1] = pack_xy(px[0], py[0]);
+                t->w[2] = ((uint32_t)clut << 16) | pack_uv(pv[0]);
+                t->w[3] = pack_col(pv[1]) | ((c->bank & 0xFFu) << 24);
+                t->w[4] = pack_xy(px[1], py[1]);
+                t->w[5] = ((uint32_t)tpage << 16) | pack_uv(pv[1]);
+                t->w[6] = pack_col(pv[2]) | ((c->bank >> 8) << 24);
+                t->w[7] = pack_xy(px[2], py[2]);
+                t->w[8] = pack_uv(pv[2]);
+                t->depth_mode = 1;   /* HTP2 (early faces have depth, no glow) */
+                for (int i = 0; i < 3; i++) {
+                    t->q[i] = fmaxf(pq[i] * qs, 1e-6f);
+                    t->xy[i * 2] = px[i];
+                    t->xy[i * 2 + 1] = py[i];
+                    t->uv[i * 2] = fminf(fmaxf(pv[i]->u, 0.0f), 255.0f);
+                    t->uv[i * 2 + 1] = fminf(fmaxf(pv[i]->v, 0.0f), 255.0f);
+                }
+                t->uvlim = c->uvlim;
+                t->uv_kind = qm ? 3 : c->uvlim ? 2 : 1;
+                t->bank = (uint16_t)c->bank;
+                if (qm) {
+                    for (int i = 0; i < 3; i++) qm_point(pv[i], &t->qp[i * 2], &t->qp[i * 2 + 1]);
+                    for (int i = 0; i < 4; i++) t->qe[i] = s_qm.e[i];
+                    for (int i = 0; i < 8; i++) t->quv[i] = s_qm.uv[i];
+                    for (int i = 0; i < 4; i++) t->qcol[i] = s_qm.col[i];
+                }
+                s_stat_tris++; s_vb_tris++;
+                continue;
+            }
+        }
         pk = c->out + c->out_used;
         addr = c->out_addr + c->out_used;
         prev = rd32(ot_entry);
@@ -1977,6 +2075,7 @@ static int frame_buffer_begin(void) {
         s_frame++;
         s_arena_used[buf] = 0;
         arena_live(buf);
+        direct_reset(buf);
         s_nviews = 0;
     } else if (cur < s_last_prim_cursor) {
         /* the same buffer built again from its start (the game threw the
@@ -3407,12 +3506,21 @@ void tsr_native_scene_section_draw(struct CPUState *cpu, uint32_t address) {
 
 /* After a rollback (tsr_online.c): the restored game builds its frame again;
  * the renderer's own frame bookkeeping starts over with it. */
+/* The frame's drawing starts over in the same buffer (tsr_online.c: a
+ * player's own view drawn again after the game's frame was sent): the next
+ * draw begins a new native frame, its arena and batches from the start. */
+void tsr_native_scene_new_frame(void) {
+    s_last_buf = -1;
+}
+
 void tsr_native_scene_on_rollback(void) {
     /* the arenas as far as the restored frame had filled them (its ordering
      * table may already point at packets from before the snapshot) */
     for (int i = 0; i < 2; ++i)
         if (s_arena[i]) s_arena_used[i] = psx_mod_gpu_dma_get_live(s_arena[i]);
     s_last_buf = rd32(BUFFER_VAR) == BUFFER0 ? 0 : 1;
+    direct_reset(0);
+    direct_reset(1);
 }
 
 /* debug block byte (0 when the block is not allocated) */
@@ -3482,5 +3590,7 @@ void tsr_native_scene_activate(int enabled, int draw_distance) {
      * widescreen-margin copy. Ours (own arena, exact positions) and our
      * host banks qualify; the game's own primitives keep their isolation. */
     psx_mod_set_native_packet_batching(s_enabled);
+    if (s_direct < 0) { const char *e = getenv("TSR_DIRECT"); s_direct = !(e && e[0] == '0'); }
+    psx_mod_set_native_batch_hook(s_enabled && s_direct ? direct_batch_hook : NULL);
     psx_mod_set_texture_bank_batching(s_enabled);
 }

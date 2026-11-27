@@ -46,9 +46,9 @@ known_crc32 = [
 # (tsr_native_scene.c). The camera's matrix builder 0x8004010C: the camera
 # angles worked out again without rounding; the path point 0x8007BCC4 of the
 # pre-race flight without its 1/64-segment steps (tsr_native_scene.c).
-mod_function_entry_funcs = ["0x80038364", "0x80039E30", "0x8004DE64", "0x80043538", "0x80011568", "0x80010000", "0x8002207C", "0x8002274C", "0x80023F58", "0x80024568", "0x80012040", "0x80033A84", "0x800723A0", "0x8004E28C", "0x8004DB54", "0x80011C18",
+mod_function_entry_funcs = ["0x80063D10", "0x80073BC0", "0x800667E8", "0x8006E63C", "0x80038364", "0x80039E30", "0x8004DE64", "0x80043538", "0x80011568", "0x80010000", "0x8002207C", "0x8002274C", "0x80023F58", "0x80024568", "0x80012040", "0x80033A84", "0x800723A0", "0x8004E28C", "0x8004DB54", "0x80011C18",
   "0x80096168", "0x80099428", "0x80099DE8", "0x80099F84", "0x80061F44",
-  "0x80011058", "0x80054558", "0x80054FD0", "0x80055A24", "0x8004010C",
+  "0x80011058", "0x80054558", "0x80054FD0", "0x80055A24", "0x8004010C", "0x800861CC", "0x8005E638",
   "0x8007BCC4"]
 bios_config = "psxrecomp/bios/SCPH1001.toml"
 seeds = "seeds/ghidra_funcs.txt"
@@ -1615,3 +1615,82 @@ address = "0x8004E7B0"
 expected = "0x04800079"
 replacement = "0x00000000"
 note = "icon drawer: no left cull - title clouds in the widescreen margins"
+
+# Players 3-4 (tsr_online.c): these "is this kart a player" tests (kart index
+# +0x90 < player count 0x800A97E4) read the human kart count byte 0x800AA0C0
+# instead (unused by the game; the plugin keeps it = player count + extra players).
+
+[[recompiler.patch]]
+id = "humans-80067940"
+address = "0x80067940"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: start boost (Cross at the countdown) and skid sounds"
+
+[[recompiler.patch]]
+id = "humans-8007F200"
+address = "0x8007F200"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: antenna physics in split screen"
+
+[[recompiler.patch]]
+id = "humans-80066318"
+address = "0x80066318"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: antenna swing in split screen"
+
+[[recompiler.patch]]
+id = "humans-80054864"
+address = "0x80054864"
+expected = "0x804297E4"
+replacement = "0x8042A0C0"
+note = "human karts: antenna drawn in segments in split screen"
+
+[[recompiler.patch]]
+id = "humans-80037128"
+address = "0x80037128"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: position on the HUD rope"
+
+[[recompiler.patch]]
+id = "humans-8006687C"
+address = "0x8006687C"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: kart flag 0x20000 at race start in split screen"
+
+# ... kept equal to the player count by the game itself: the count's setter
+# 0x80063740 stores it there too (its "v0 = 2; bne a0,v0" moved one slot down,
+# the branch's delay slot now the next instruction, which its target
+# overwrites). Fail-safe: without the plugin, the tests are the game's own.
+
+[[recompiler.patch]]
+id = "humans-80063760"
+address = "0x80063760"
+expected = "0x24020002"
+replacement = "0xA022A0C0"
+note = "human karts: player count also stored at 0x800AA0C0 (sb v0,-24384(at))"
+
+[[recompiler.patch]]
+id = "humans-80063764"
+address = "0x80063764"
+expected = "0x14820009"
+replacement = "0x24020002"
+note = "human karts: addiu v0,zero,2 (moved)"
+
+[[recompiler.patch]]
+id = "humans-80063768"
+address = "0x80063768"
+expected = "0x00000000"
+replacement = "0x14820008"
+note = "human karts: bne a0,v0,0x8006378C (moved; delay slot lui v0 is overwritten at the target)"
+
+[[recompiler.patch]]
+id = "humans-80067460"
+address = "0x80067460"
+expected = "0x806397E4"
+replacement = "0x8063A0C0"
+note = "human karts: engine sound (players 3-4 too; their sound keys remapped by tsr_online.c)"
